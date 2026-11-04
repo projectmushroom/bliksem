@@ -23,6 +23,7 @@ rm -f .build/release/Bliksem_Bliksem.bundle/crt.metal
 cp .build/default.metallib .build/release/Bliksem_Bliksem.bundle/
 cp -R .build/release/Bliksem_Bliksem.bundle "$APP/Contents/Resources/"
 cp Info.plist "$APP/Contents/"
+[ -z "$VERSION" ] || plutil -replace CFBundleShortVersionString -string "$VERSION" "$APP/Contents/Info.plist"
 cp Bliksem.icns "$APP/Contents/Resources/"
 codesign -s - -f "$APP" >/dev/null 2>&1
 echo "built $PWD/$APP"

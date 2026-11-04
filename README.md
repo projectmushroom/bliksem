@@ -12,6 +12,13 @@ System-wide Now Playing, media keys, menu bar.
 
 Needs Xcode 26 on macOS 14 or later. No developer account needed, it's ad-hoc signed for your own Mac.
 
+## Release
+
+    ./release.sh 0.2.0
+
+Builds a DMG, tags `v0.2.0` and publishes it as a GitHub release. The app is not notarized, so a DMG downloaded
+from GitHub trips Gatekeeper once: `xattr -d com.apple.quarantine /Applications/BLIKSEM.app`, or right-click › Open.
+
 ## Key
 
 Paste your DI.fm listen key in the `key>` field (di.fm › settings › listen key). Without it nothing plays: DI no longer serves free streams to third-party players.
