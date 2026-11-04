@@ -11,17 +11,20 @@ if [ ! -f Bliksem.icns ]; then
   done
   iconutil -c icns "$T" -o Bliksem.icns
 fi
-swift build -c release 2>&1 | grep -E "error|Build complete" | tail -5
+# Universal binary so the DMG runs natively on Intel and Apple Silicon.
+swift build -c release --arch arm64 --arch x86_64 2>&1 | grep -E "error|Build complete" | tail -5
+OUT=.build/apple/Products/Release
 # SwiftPM does not compile Metal, so the CRT shader becomes default.metallib by hand.
 xcrun -sdk macosx metal -c Shaders/crt.metal -o .build/crt.air
 xcrun -sdk macosx metallib .build/crt.air -o .build/default.metallib
 APP=.build/BLIKSEM.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp .build/release/Bliksem "$APP/Contents/MacOS/"
-rm -f .build/release/Bliksem_Bliksem.bundle/crt.metal
-cp .build/default.metallib .build/release/Bliksem_Bliksem.bundle/
-cp -R .build/release/Bliksem_Bliksem.bundle "$APP/Contents/Resources/"
+cp "$OUT/Bliksem" "$APP/Contents/MacOS/"
+R="$OUT/Bliksem_Bliksem.bundle"; [ -d "$R/Contents/Resources" ] && R="$R/Contents/Resources"
+rm -f "$R/crt.metal" "$OUT/Bliksem_Bliksem.bundle/default.metallib"
+cp .build/default.metallib "$R/"
+cp -R "$OUT/Bliksem_Bliksem.bundle" "$APP/Contents/Resources/"
 cp Info.plist "$APP/Contents/"
 [ -z "$VERSION" ] || plutil -replace CFBundleShortVersionString -string "$VERSION" "$APP/Contents/Info.plist"
 cp Bliksem.icns "$APP/Contents/Resources/"
