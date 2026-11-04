@@ -27,3 +27,4 @@ using namespace metal;
     uv *= 1.0 + amount * dot(uv, uv);
     return (uv + 1.0) * 0.5 * size;
 }
+

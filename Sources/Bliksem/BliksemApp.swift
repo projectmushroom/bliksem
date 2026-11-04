@@ -6,7 +6,7 @@ struct BliksemApp: App {
     @State private var m = Model()
 
     init() {
-        if let url = Bundle.module.url(forResource: "Px437_IBM_VGA_9x16", withExtension: "ttf") {
+        if let url = Phosphor.resources.url(forResource: "Px437_IBM_VGA_9x16", withExtension: "ttf") {
             CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil)
         }
         // Dev hook: BLIKSEM_SNAP=/path.png renders the screen (minus scroll views and the CRT shader) after 5s,
@@ -21,10 +21,9 @@ struct BliksemApp: App {
                 }
                 Task {
                     if #available(macOS 15, *) {
-                        let lib = ShaderLibrary.bundle(.module)
                         do {
-                            try await lib.phosphor(.float2(CGSize(width: 1, height: 1))).compile(as: .layerEffect)
-                            try await lib.curve(.float2(CGSize(width: 1, height: 1)), .float(0.045)).compile(as: .distortionEffect)
+                            try await Phosphor.shaders.phosphor(.float2(CGSize(width: 1, height: 1))).compile(as: .layerEffect)
+                            try await Phosphor.shaders.curve(.float2(CGSize(width: 1, height: 1)), .float(0.045)).compile(as: .distortionEffect)
                             FileHandle.standardError.write(Data("shaders ok\n".utf8))
                         } catch {
                             FileHandle.standardError.write(Data("shader error: \(error)\n".utf8))

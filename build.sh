@@ -19,8 +19,9 @@ APP=.build/BLIKSEM.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp .build/release/Bliksem "$APP/Contents/MacOS/"
+rm -f .build/release/Bliksem_Bliksem.bundle/crt.metal
+cp .build/default.metallib .build/release/Bliksem_Bliksem.bundle/
 cp -R .build/release/Bliksem_Bliksem.bundle "$APP/Contents/Resources/"
-cp .build/default.metallib "$APP/Contents/Resources/Bliksem_Bliksem.bundle/"
 cp Info.plist "$APP/Contents/"
 cp Bliksem.icns "$APP/Contents/Resources/"
 codesign -s - -f "$APP" >/dev/null 2>&1

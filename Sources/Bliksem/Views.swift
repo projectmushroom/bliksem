@@ -7,6 +7,10 @@ enum Phosphor {
     static let dim = Color(red: 0.60, green: 0.38, blue: 0.08)
     static let bg = Color(red: 0.07, green: 0.045, blue: 0.03)
     static let font = Font.custom("Px437 IBM VGA 9x16", fixedSize: 16)
+    /// SwiftPM's Bundle.module looks beside the executable or in the build dir; the app keeps it in Contents/Resources.
+    static let resources = Bundle.main.url(forResource: "Bliksem_Bliksem", withExtension: "bundle").flatMap(Bundle.init(url:)) ?? Bundle.module
+    /// build.sh compiles Shaders/crt.metal into default.metallib inside that bundle.
+    static let shaders = resources.url(forResource: "default", withExtension: "metallib").map(ShaderLibrary.init(url:)) ?? .bundle(resources)
 }
 
 /// Fit a string to exactly n cells.
@@ -24,8 +28,8 @@ extension View {
     func crt() -> some View {
         visualEffect { content, proxy in
             content
-                .layerEffect(ShaderLibrary.bundle(.module).phosphor(.float2(proxy.size)), maxSampleOffset: CGSize(width: 4, height: 4))
-                .distortionEffect(ShaderLibrary.bundle(.module).curve(.float2(proxy.size), .float(0.045)), maxSampleOffset: CGSize(width: 80, height: 60))
+                .layerEffect(Phosphor.shaders.phosphor(.float2(proxy.size)), maxSampleOffset: CGSize(width: 4, height: 4))
+                .distortionEffect(Phosphor.shaders.curve(.float2(proxy.size), .float(0.045)), maxSampleOffset: CGSize(width: 80, height: 60))
         }
     }
 }
