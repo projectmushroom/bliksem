@@ -1,4 +1,3 @@
-import AVFoundation
 import AppKit
 import MediaPlayer
 import Observation
@@ -32,7 +31,14 @@ private func save<T: Encodable>(_ value: T, _ key: String) {
     UserDefaults.standard.set(try? JSONEncoder().encode(value), forKey: key)
 }
 
+struct ChannelSection: Identifiable {
+    let id: String
+    let title: String
+    let channels: [Channel]
+}
+
 @MainActor @Observable final class Model {
+    static let favSection = "favs"
     var channels: [Channel] = load("channels") ?? [] { didSet { save(channels, "channels") } }
     var technoIDs: [Int] = load("technoIDs") ?? [] { didSet { save(technoIDs, "technoIDs") } }
     var likes: [Liked] = load("likes") ?? [] { didSet { save(likes, "likes") } }
@@ -43,16 +49,20 @@ private func save<T: Encodable>(_ value: T, _ key: String) {
     var history: [HistoryTrack] = []
     var current: Channel?
     var playing = false
+    private var wanted = false
     var status = ""
     var query = ""
-    var showAll = false
     var focusSearch = 0
+    var focusRoot = 0
+    var favs: [Int] = load("favs") ?? [] { didSet { save(favs, "favs") } }
+    var collapsed: Set<String> = load("collapsed") ?? [] { didSet { save(collapsed, "collapsed") } }
+    var slots: [Module] = load("slots") ?? [.vu, .wave, .last] { didSet { save(slots, "slots") } }
 
-    private let player = AVPlayer()
+    let radio: Radio
+    /// Lives here so the needles keep swinging when a module is flipped away and back.
+    @ObservationIgnored let needle = Ballistics()
     private var ticks = 0
     private var lastTrackID: Int?
-    private var playerObs: NSKeyValueObservation?
-    private var itemObs: NSKeyValueObservation?
 
     var listenKey: String = UserDefaults.standard.string(forKey: "key") ?? "" { didSet { UserDefaults.standard.set(listenKey, forKey: "key") } }
     var zoom: CGFloat = max(1, CGFloat(UserDefaults.standard.double(forKey: "zoom"))) { didSet { UserDefaults.standard.set(zoom, forKey: "zoom") } }
@@ -66,29 +76,54 @@ private func save<T: Encodable>(_ value: T, _ key: String) {
     var nowArtPath: String? { history.first { $0.track_id == nowTrack?.id }?.art_url }
     var nowArt: URL? { img(nowArtPath, 600) ?? current?.art }
 
-    var visible: [Channel] {
+    /// Favourites on top, DI's techno group next, everything else after. A search flattens it to the matches.
+    var sections: [ChannelSection] {
         let q = query.lowercased()
-        if !q.isEmpty { return channels.filter { $0.name.lowercased().contains(q) || $0.key.contains(q) } }
-        if showAll { return channels }
-        return technoIDs.compactMap { id in channels.first { $0.id == id } }
-    }
-
-    var top: [Channel] {
-        Array(channels.filter { seconds[$0.key, default: 0] > 0 }
-            .sorted { seconds[$0.key, default: 0] > seconds[$1.key, default: 0] }
-            .prefix(9))
-    }
-
-    init() {
-        playerObs = player.observe(\.timeControlStatus) { [weak self] p, _ in
-            let s = p.timeControlStatus
-            Task { @MainActor in
-                guard let self else { return }
-                self.playing = s == .playing
-                if s == .playing { self.status = "" } else if s == .waitingToPlayAtSpecifiedRate { self.status = Copy.loading }
-                MPNowPlayingInfoCenter.default().playbackState = s == .paused ? .paused : .playing
-            }
+        if !q.isEmpty {
+            return [ChannelSection(id: "results", title: Copy.results, channels: channels.filter { $0.name.lowercased().contains(q) || $0.key.contains(q) })]
         }
+        let byID = Dictionary(channels.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let pinned = favs.compactMap { byID[$0] }
+        let techno = technoIDs.filter { !favs.contains($0) }.compactMap { byID[$0] }
+        let taken = Set(favs + technoIDs)
+        let rest = channels.filter { !taken.contains($0.id) }.sorted { $0.name < $1.name }
+        return [
+            ChannelSection(id: Self.favSection, title: Copy.favs, channels: pinned),
+            ChannelSection(id: "techno", title: Copy.techno, channels: techno),
+            ChannelSection(id: "rest", title: Copy.rest, channels: rest),
+        ]
+    }
+
+    /// What the arrow keys hop through: the channels you can see.
+    var visible: [Channel] { sections.filter { !collapsed.contains($0.id) }.flatMap(\.channels) }
+
+    /// Cmd+1-9 and the menu bar: favourites first, then whatever you listen to most.
+    var top: [Channel] {
+        let byID = Dictionary(channels.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let listened = channels.filter { seconds[$0.key, default: 0] > 0 && !favs.contains($0.id) }
+            .sorted { seconds[$0.key, default: 0] > seconds[$1.key, default: 0] }
+        return Array((favs.compactMap { byID[$0] } + listened).prefix(9))
+    }
+
+    func isFav(_ id: Int) -> Bool { favs.contains(id) }
+    func toggleFav(_ id: Int) { if let i = favs.firstIndex(of: id) { favs.remove(at: i) } else { favs.append(id) } }
+    func toggleCollapsed(_ id: String) { if collapsed.contains(id) { collapsed.remove(id) } else { collapsed.insert(id) } }
+
+    func cycle(slot: Int, by d: Int) {
+        let all = Module.allCases
+        guard slots.indices.contains(slot), let i = all.firstIndex(of: slots[slot]) else { return }
+        // Skip modules already showing in another slot.
+        for step in 1..<all.count {
+            let next = all[(i + d * step + all.count * step) % all.count]
+            if !slots.contains(next) { slots[slot] = next; return }
+        }
+    }
+    func addSlot() { if let free = Module.allCases.first(where: { !slots.contains($0) }) { slots.append(free) } }
+    func removeSlot(_ i: Int) { if slots.count > 1, slots.indices.contains(i) { slots.remove(at: i) } }
+
+    init(radio: Radio = Radio(), autoplay: Bool = true) {
+        self.radio = radio
+        radio.onState = { [weak self] s in DispatchQueue.main.async { self?.radioChanged(s) } }
         remote()
         Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tick() }
@@ -96,7 +131,7 @@ private func save<T: Encodable>(_ value: T, _ key: String) {
         Task {
             await refreshChannels()
             await refresh()
-            if let id = UserDefaults.standard.object(forKey: "lastChannel") as? Int,
+            if autoplay, let id = UserDefaults.standard.object(forKey: "lastChannel") as? Int,
                let c = channels.first(where: { $0.id == id }) {
                 play(c)
             }
@@ -113,14 +148,10 @@ private func save<T: Encodable>(_ value: T, _ key: String) {
         guard !key.isEmpty else { status = Copy.noKey; return }
         Task {
             do {
-                let url = try await DI.streamURL(channel: c.key, key: key)
+                let urls = try await DI.streamURLs(channel: c.key, key: key)
                 guard current?.id == c.id else { return }
-                let item = AVPlayerItem(url: url)
-                itemObs = item.observe(\.status) { [weak self] i, _ in
-                    if i.status == .failed { Task { @MainActor in self?.status = Copy.dead } }
-                }
-                player.replaceCurrentItem(with: item)
-                player.play()
+                wanted = true
+                radio.play(urls)
                 await refresh()
             } catch {
                 status = error is DIError ? Copy.badKey : Copy.dead
@@ -128,15 +159,28 @@ private func save<T: Encodable>(_ value: T, _ key: String) {
         }
     }
 
+    func radioChangedForTests(_ s: RadioState) { radioChanged(s) }
+
+    private func radioChanged(_ s: RadioState) {
+        playing = s == .playing
+        switch s {
+        case .idle, .playing: status = ""
+        case .connecting, .buffering: status = Copy.loading
+        case .reconnecting: status = Copy.dropped
+        case .refused: status = Copy.refused; wanted = false
+        }
+        MPNowPlayingInfoCenter.default().playbackState = wanted ? .playing : .paused
+    }
+
     /// Radio: stop drops the buffer, play reconnects live.
     func stop() {
-        player.pause()
-        player.replaceCurrentItem(with: nil)
+        wanted = false
+        radio.stop()
         status = ""
     }
 
     func toggle() {
-        if player.timeControlStatus == .paused {
+        if !wanted {
             if let c = current ?? visible.first { play(c) }
         } else {
             stop()
@@ -184,7 +228,7 @@ private func save<T: Encodable>(_ value: T, _ key: String) {
         history = h
         guard let t = nowTrack, t.id != lastTrackID else { return }
         lastTrackID = t.id
-        if player.timeControlStatus != .paused {
+        if playing {
             heard.append(Heard(date: .now, channel: c.name, trackID: t.id, artist: t.artist, title: t.title, art: nowArtPath))
         }
         nowPlayingInfo()
@@ -220,7 +264,7 @@ private func save<T: Encodable>(_ value: T, _ key: String) {
     private func remote() {
         let r = MPRemoteCommandCenter.shared()
         let actions: [(MPRemoteCommand, @MainActor () -> Void)] = [
-            (r.playCommand, { [weak self] in if self?.player.timeControlStatus == .paused { self?.toggle() } }),
+            (r.playCommand, { [weak self] in if self?.wanted == false { self?.toggle() } }),
             (r.pauseCommand, { [weak self] in self?.stop() }),
             (r.togglePlayPauseCommand, { [weak self] in self?.toggle() }),
             (r.nextTrackCommand, { [weak self] in self?.hop(1) }),

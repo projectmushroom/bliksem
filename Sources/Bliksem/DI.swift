@@ -81,27 +81,19 @@ enum DI {
         return t.isrc
     }
 
-    /// Premium 320k. DI no longer serves free streams to third-party players.
-    static func streamURL(channel: String, key: String) async throws -> URL {
+    /// Premium 320k servers for a channel. An invalid key gets plain text back instead of a playlist.
+    static func streamURLs(channel: String, key: String) async throws -> [URL] {
         let (data, _) = try await URLSession.shared.data(from: URL(string: "https://listen.di.fm/premium_high/\(channel).pls?listen_key=\(key)")!)
         let body = String(decoding: data, as: UTF8.self)
         let urls = parsePLS(body)
         guard !urls.isEmpty else { throw DIError(body) }
-        // DI lists several servers; some don't even resolve, so take the first that answers.
-        for url in urls where await reachable(url) { return url }
-        throw URLError(.cannotConnectToHost)
+        return urls
     }
 
     static func parsePLS(_ s: String) -> [URL] {
         s.split(whereSeparator: \.isNewline).filter { $0.hasPrefix("File") }.compactMap { line in
             line.firstIndex(of: "=").flatMap { URL(string: line[line.index(after: $0)...].trimmingCharacters(in: .whitespaces)) }
         }
-    }
-
-    static func reachable(_ url: URL) async -> Bool {
-        guard let (bytes, response) = try? await URLSession.shared.bytes(for: URLRequest(url: url, timeoutInterval: 4)) else { return false }
-        bytes.task.cancel()
-        return (response as? HTTPURLResponse)?.statusCode == 200
     }
 }
 
