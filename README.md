@@ -14,7 +14,7 @@ Needs Xcode 26 on macOS 14 or later. No developer account needed, it's ad-hoc si
 
 ## Key
 
-Paste your DI.fm listen key in the `key>` field (di.fm › settings › listen key). Without it you get the free stream with ads.
+Paste your DI.fm listen key in the `key>` field (di.fm › settings › listen key). Without it nothing plays: DI no longer serves free streams to third-party players.
 
 ## Keys
 

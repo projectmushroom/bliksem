@@ -81,10 +81,9 @@ enum DI {
         return t.isrc
     }
 
-    /// Premium 320k with a key, free stream with ads without one.
+    /// Premium 320k. DI no longer serves free streams to third-party players.
     static func streamURL(channel: String, key: String) async throws -> URL {
-        let path = key.isEmpty ? "public3/\(channel).pls" : "premium_high/\(channel).pls?listen_key=\(key)"
-        let (data, _) = try await URLSession.shared.data(from: URL(string: "https://listen.di.fm/" + path)!)
+        let (data, _) = try await URLSession.shared.data(from: URL(string: "https://listen.di.fm/premium_high/\(channel).pls?listen_key=\(key)")!)
         let body = String(decoding: data, as: UTF8.self)
         let urls = parsePLS(body)
         guard !urls.isEmpty else { throw DIError(body) }

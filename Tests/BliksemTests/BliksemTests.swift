@@ -44,9 +44,22 @@ final class BliksemTests: XCTestCase {
         XCTAssertEqual(CTFontGetAscent(font) + CTFontGetDescent(font) + CTFontGetLeading(font), 16)
     }
 
-    /// Network smoke test: the free stream must resolve and AVPlayer must reach readyToPlay. Muted.
-    func testFreeStreamIsPlayable() async throws {
-        let url = try await DI.streamURL(channel: "techno", key: "")
+    func testTechnoFilterFromLiveAPI() async throws {
+        let ids = try await DI.technoIDs()
+        XCTAssertEqual(ids.count, 14)
+    }
+
+    @MainActor func testModelLoadsTechnoList() async throws {
+        let m = Model()
+        for _ in 0..<40 where m.visible.isEmpty { try await Task.sleep(for: .milliseconds(250)) }
+        XCTAssertEqual(m.visible.count, 14)
+        XCTAssertGreaterThan(m.channels.count, 100)
+    }
+
+    /// Network smoke test, muted. Run with DI_LISTEN_KEY=… swift test
+    func testPremiumStreamIsPlayable() async throws {
+        guard let key = ProcessInfo.processInfo.environment["DI_LISTEN_KEY"], !key.isEmpty else { throw XCTSkip("set DI_LISTEN_KEY") }
+        let url = try await DI.streamURL(channel: "techno", key: key)
         let player = AVPlayer(url: url)
         player.isMuted = true
         player.play()

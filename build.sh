@@ -1,6 +1,6 @@
-#!/bin/sh
+#!/bin/bash
 # Builds BLIKSEM.app into .build/ and ad-hoc signs it. Run ./build.sh then open .build/BLIKSEM.app
-set -e
+set -eo pipefail
 cd "$(dirname "$0")"
 if [ ! -f Bliksem.icns ]; then
   T=$(mktemp -d)/Bliksem.iconset; mkdir -p "$T"

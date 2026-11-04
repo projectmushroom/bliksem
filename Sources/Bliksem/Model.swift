@@ -90,11 +90,10 @@ private func save<T: Encodable>(_ value: T, _ key: String) {
         }
         Task {
             await refreshChannels()
+            await refresh()
             if let id = UserDefaults.standard.object(forKey: "lastChannel") as? Int,
                let c = channels.first(where: { $0.id == id }) {
                 play(c)
-            } else {
-                await refresh()
             }
         }
     }
@@ -106,6 +105,7 @@ private func save<T: Encodable>(_ value: T, _ key: String) {
         status = Copy.loading
         UserDefaults.standard.set(c.id, forKey: "lastChannel")
         nowPlayingInfo()
+        guard !key.isEmpty else { status = Copy.noKey; return }
         Task {
             do {
                 let url = try await DI.streamURL(channel: c.key, key: key)

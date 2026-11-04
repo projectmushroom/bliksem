@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 enum Phosphor {
     static let amber = Color(red: 1.00, green: 0.66, blue: 0.12)
@@ -107,14 +108,9 @@ struct ChannelPane: View {
     @Bindable var m: Model
     let cols: Int
     @AppStorage("key") private var key = ""
-    @FocusState private var searching: Bool
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 0) {
-                Text(Copy.find)
-                TextField("", text: $m.query, prompt: Text(Copy.search).foregroundStyle(Phosphor.dim))
-                    .textFieldStyle(.plain).foregroundStyle(Phosphor.bright).focused($searching)
-            }.row()
+            GridInput(prompt: Copy.find, text: $m.query, placeholder: Copy.search, focusTrigger: m.focusSearch).row()
             HStack(spacing: 0) {
                 Text(" ")
                 Btn(label: "[ \(Copy.techno) ]", on: !m.showAll) { m.showAll = false }
@@ -123,21 +119,16 @@ struct ChannelPane: View {
             }.row()
             Text(String(repeating: "─", count: cols)).row()
             ScrollView(showsIndicators: false) {
-                LazyVStack(spacing: 0) { ForEach(m.visible) { c in ChannelRows(c: c, m: m, cols: cols) } }
+                VStack(spacing: 0) { ForEach(m.visible) { c in ChannelRows(c: c, m: m, cols: cols) } }
             }
             .focusable().focusEffectDisabled()
             .onKeyPress(.space) { m.toggle(); return .handled }
             .onKeyPress(.upArrow) { m.hop(-1); return .handled }
             .onKeyPress(.downArrow) { m.hop(1); return .handled }
             Text(String(repeating: "─", count: cols)).row()
-            HStack(spacing: 0) {
-                Text(Copy.keyPrompt)
-                SecureField("", text: $key, prompt: Text(Copy.keyPlaceholder).foregroundStyle(Phosphor.dim))
-                    .textFieldStyle(.plain).foregroundStyle(Phosphor.bright)
-            }.row()
+            GridInput(prompt: Copy.keyPrompt, text: $key, secret: true, placeholder: Copy.keyPlaceholder).row()
             Text(pad(Copy.keyHint, cols)).foregroundStyle(Phosphor.dim).row()
         }
-        .onChange(of: m.focusSearch) { searching = true }
     }
 }
 
@@ -148,7 +139,7 @@ struct ChannelRows: View {
     var body: some View {
         let on = m.current?.id == c.id
         let time = hm(m.seconds[c.key] ?? 0)
-        let np = m.onAir[c.id].map { "  \($0.artist) – \($0.title)" } ?? ""
+        let np = m.onAir[c.id].map { "  \($0.artist) - \($0.title)" } ?? ""
         VStack(spacing: 0) {
             Text(pad(" " + c.name.uppercased(), cols - time.count - 1) + time + " ").row()
             Text(pad(np, cols)).foregroundStyle(on ? Phosphor.bg : Phosphor.dim).row()
@@ -190,7 +181,7 @@ struct NowPane: View {
                             .frame(width: CGFloat(w) * 9, height: 48, alignment: .topLeading)
                         Text(pad(" " + (m.nowTrack?.artist ?? ""), w)).row()
                         Text("").row()
-                        Text(pad(" " + votes + hm(m.seconds[c.key] ?? 0) + " " + Copy.onChannel, w)).foregroundStyle(Phosphor.dim).row()
+                        Text(pad(" " + votes + listened(c), w)).foregroundStyle(Phosphor.dim).row()
                         Text("").row()
                         HStack(spacing: 0) {
                             Text(" ")
@@ -243,6 +234,61 @@ struct NowPane: View {
     }
 
     private var w: Int { cols - 22 }
+
+    private func listened(_ c: Channel) -> String {
+        let t = hm(m.seconds[c.key] ?? 0)
+        return t.isEmpty ? "" : t + " " + Copy.onChannel
+    }
+}
+
+/// Text input on the character grid with a blinking block cursor. Typing, backspace, escape clears, paste works.
+struct GridInput: View {
+    let prompt: String
+    @Binding var text: String
+    var secret = false
+    var placeholder = ""
+    var focusTrigger = 0
+    @FocusState private var focused: Bool
+    var body: some View {
+        let shown = secret ? String(repeating: "*", count: text.count) : text
+        HStack(spacing: 0) {
+            Text(prompt)
+            if shown.isEmpty && !focused {
+                Text(placeholder).foregroundStyle(Phosphor.dim)
+            } else {
+                Text(shown).foregroundStyle(Phosphor.bright)
+            }
+            if focused {
+                TimelineView(.periodic(from: .now, by: 0.5)) { ctx in
+                    Text(Int(ctx.date.timeIntervalSinceReferenceDate * 2) % 2 == 0 ? "█" : " ")
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .contentShape(Rectangle())
+        .focusable(true, interactions: .edit).focusEffectDisabled()
+        .focused($focused)
+        .onTapGesture { focused = true }
+        .onChange(of: focusTrigger) { focused = true }
+        .onKeyPress(phases: .down) { p in
+            if p.modifiers.contains(.command) || p.modifiers.contains(.control) { return .ignored }
+            switch p.key {
+            case .delete: if !text.isEmpty { text.removeLast() }; return .handled
+            case .escape: text = ""; return .handled
+            default:
+                guard p.characters.count == 1, let c = p.characters.first, !c.isNewline, c != "\t",
+                      c.unicodeScalars.first.map({ $0.value >= 32 }) == true else { return .ignored }
+                text.append(c)
+                return .handled
+            }
+        }
+        .onPasteCommand(of: [.text]) { providers in
+            providers.first?.loadObject(ofClass: NSString.self) { s, _ in
+                guard let s = s as? String else { return }
+                DispatchQueue.main.async { text += s.trimmingCharacters(in: .whitespacesAndNewlines) }
+            }
+        }
+    }
 }
 
 struct Check: View {
@@ -260,7 +306,7 @@ struct HistoryList: View {
                     let time = t.started.map { Date(timeIntervalSince1970: $0).formatted(.dateTime.hour().minute()) } ?? "--:--"
                     let right = (t.votes.map { " ▲\($0.up) ▼\($0.down) " } ?? " ") + "    "
                     HStack(spacing: 0) {
-                        Text(pad(" \(time)  \(t.artist) – \(t.title)", cols - right.count) + right)
+                        Text(pad(" \(time)  \(t.artist) - \(t.title)", cols - right.count) + right)
                         Check(on: m.isLiked(t.track_id))
                         Text(" ")
                     }
@@ -283,7 +329,7 @@ struct LikesList: View {
                     let apple = l.appleState == "found" ? Copy.onApple : l.appleState == "none" ? Copy.notOnApple : Copy.appleSearching
                     let tail = apple.count + 22
                     HStack(spacing: 0) {
-                        Text(pad(" \(l.date.formatted(.dateTime.day().month())) \(l.artist) – \(l.title)  ", cols - tail))
+                        Text(pad(" \(l.date.formatted(.dateTime.day().month())) \(l.artist) - \(l.title)  ", cols - tail))
                         Btn(label: apple, color: l.appleState == "found" ? Phosphor.bright : Phosphor.dim) {
                             NSWorkspace.shared.open(l.apple.flatMap(URL.init) ?? AppleMusic.searchURL("\(l.artist) \(l.title)"))
                         }
@@ -309,16 +355,12 @@ struct HeardList: View {
         let q = query.lowercased()
         let rows = m.heard.reversed().filter { q.isEmpty || "\($0.artist) \($0.title) \($0.channel)".lowercased().contains(q) }
         VStack(spacing: 0) {
-            HStack(spacing: 0) {
-                Text(Copy.find)
-                TextField("", text: $query, prompt: Text(Copy.heardSearch).foregroundStyle(Phosphor.dim))
-                    .textFieldStyle(.plain).foregroundStyle(Phosphor.bright)
-            }.row()
+            GridInput(prompt: Copy.find, text: $query, placeholder: Copy.heardSearch).row()
             ScrollView(showsIndicators: false) {
                 LazyVStack(spacing: 0) {
                     ForEach(rows) { h in
                         HStack(spacing: 0) {
-                            Text(pad(" \(h.date.formatted(.dateTime.day().month().hour().minute()))  \(h.channel.uppercased())  \(h.artist) – \(h.title)", cols - 5))
+                            Text(pad(" \(h.date.formatted(.dateTime.day().month().hour().minute()))  \(h.channel.uppercased())  \(h.artist) - \(h.title)", cols - 5))
                             Text(" ")
                             Check(on: m.isLiked(h.trackID))
                             Text(" ")
