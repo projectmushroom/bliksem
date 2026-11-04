@@ -32,6 +32,7 @@ Paste your DI.fm listen key in the `key>` field (di.fm › settings › listen k
 | ⌘L | like what's on |
 | ⌘F | find a channel |
 | ⌘1 – ⌘9 | your most listened channels |
+| ⌘+ ⌘- ⌘0 | zoom the whole screen |
 
 ## Credits
 

@@ -3,17 +3,17 @@
 using namespace metal;
 
 // Phosphor bloom, scanlines and vignette. `pos` is in points; one font pixel is one point.
-[[ stitchable ]] half4 phosphor(float2 pos, SwiftUI::Layer layer, float2 size) {
+[[ stitchable ]] half4 phosphor(float2 pos, SwiftUI::Layer layer, float2 size, float zoom) {
     half4 c = layer.sample(pos);
     half3 glow = half3(0.0h);
-    const float r = 2.0;
+    const float r = 2.0 * zoom;
     const float2 near[8] = { float2(r, 0), float2(-r, 0), float2(0, r), float2(0, -r),
                              float2(r, r), float2(-r, r), float2(r, -r), float2(-r, -r) };
     for (int i = 0; i < 8; i++) glow += layer.sample(pos + near[i]).rgb;
     const float2 far[4] = { float2(2 * r, 0), float2(-2 * r, 0), float2(0, 2 * r), float2(0, -2 * r) };
     for (int i = 0; i < 4; i++) glow += layer.sample(pos + far[i]).rgb * 0.5h;
     half3 col = c.rgb + glow * 0.07h;
-    float scan = 0.74 + 0.26 * cos(pos.y * 6.2831853);
+    float scan = 0.74 + 0.26 * cos(pos.y * 6.2831853 / zoom);
     col *= half(scan);
     float2 uv = pos / size * 2.0 - 1.0;
     float d = dot(uv, uv);

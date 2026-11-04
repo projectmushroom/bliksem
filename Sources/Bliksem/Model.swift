@@ -54,9 +54,14 @@ private func save<T: Encodable>(_ value: T, _ key: String) {
     private var playerObs: NSKeyValueObservation?
     private var itemObs: NSKeyValueObservation?
 
-    var key: String {
-        (UserDefaults.standard.string(forKey: "key") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-    }
+    var listenKey: String = UserDefaults.standard.string(forKey: "key") ?? "" { didSet { UserDefaults.standard.set(listenKey, forKey: "key") } }
+    var zoom: CGFloat = max(1, CGFloat(UserDefaults.standard.double(forKey: "zoom"))) { didSet { UserDefaults.standard.set(zoom, forKey: "zoom") } }
+
+    var key: String { listenKey.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    func zoomIn() { zoom = Phosphor.zooms.first { $0 > zoom } ?? zoom }
+    func zoomOut() { zoom = Phosphor.zooms.last { $0 < zoom } ?? zoom }
+    func zoomReset() { zoom = 1 }
     var nowTrack: NowPlaying.Track? { current.flatMap { onAir[$0.id] } }
     var nowArtPath: String? { history.first { $0.track_id == nowTrack?.id }?.art_url }
     var nowArt: URL? { img(nowArtPath, 600) ?? current?.art }

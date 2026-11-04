@@ -14,7 +14,7 @@ struct BliksemApp: App {
         if let path = ProcessInfo.processInfo.environment["BLIKSEM_SNAP"] {
             let model = m
             DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
-                let r = ImageRenderer(content: Screen(m: model).frame(width: 1008, height: 640))
+                let r = ImageRenderer(content: Screen(m: model).frame(width: 1008, height: 640).environment(\.grid, Grid(z: model.zoom)))
                 r.scale = 2
                 if let cg = r.cgImage {
                     try? NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
@@ -22,7 +22,7 @@ struct BliksemApp: App {
                 Task {
                     if #available(macOS 15, *) {
                         do {
-                            try await Phosphor.shaders.phosphor(.float2(CGSize(width: 1, height: 1))).compile(as: .layerEffect)
+                            try await Phosphor.shaders.phosphor(.float2(CGSize(width: 1, height: 1)), .float(1)).compile(as: .layerEffect)
                             try await Phosphor.shaders.curve(.float2(CGSize(width: 1, height: 1)), .float(0.045)).compile(as: .distortionEffect)
                             FileHandle.standardError.write(Data("shaders ok\n".utf8))
                         } catch {
@@ -61,6 +61,10 @@ struct BliksemCommands: Commands {
             Button("Next channel") { m.hop(1) }.keyboardShortcut(.downArrow)
             Button("Previous channel") { m.hop(-1) }.keyboardShortcut(.upArrow)
             Button("Find") { m.focusSearch += 1 }.keyboardShortcut("f")
+            Divider()
+            Button("Zoom In") { m.zoomIn() }.keyboardShortcut("+")
+            Button("Zoom Out") { m.zoomOut() }.keyboardShortcut("-")
+            Button("Actual Size") { m.zoomReset() }.keyboardShortcut("0")
             Divider()
             ForEach(Array(m.top.enumerated()), id: \.element.id) { i, c in
                 Button(c.name) { m.play(c) }.keyboardShortcut(KeyEquivalent(Character(String(i + 1))))
