@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 bytemuck = { version = "1.25.2", features = ["derive"] }
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 cpal = "0.18.2"
 fontdue = "0.9.5"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
@@ -16,3 +17,6 @@ symphonia = { version = "0.6.1", default-features = false, features = ["mp3"] }
 ureq = "3.5.1"
 wgpu = "30.0.1"
 winit = "0.30.13"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+plist = "1"

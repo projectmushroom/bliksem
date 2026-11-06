@@ -107,6 +107,31 @@ pub fn paint(grid: &Grid, font: &Font, out: &mut Vec<u8>) {
     }
 }
 
+/// Dim at 25% over the background: where the art goes until it arrives.
+pub const ART_WAITING: Rgb = [52, 32, 11];
+
+pub fn fill(out: &mut [u8], fb_width: usize, (x, y, w, h): (usize, usize, usize, usize), c: Rgb) {
+    for dy in 0..h {
+        for dx in 0..w {
+            out[((y + dy) * fb_width + x + dx) * 4..][..3].copy_from_slice(&c);
+        }
+    }
+}
+
+/// Text at three times the font size, for the boot logo.
+pub fn big_text(out: &mut [u8], fb_width: usize, font: &Font, x: usize, y: usize, text: &str, c: Rgb) {
+    for (i, ch) in text.chars().enumerate() {
+        let Some(rows) = font.glyph(ch) else { continue };
+        for (row, bits) in rows.iter().enumerate() {
+            for col in 0..CELL_W {
+                if bits >> col & 1 == 1 {
+                    fill(out, fb_width, (x + i * CELL_W * 3 + col * 3, y + row * 3, 3, 3), c);
+                }
+            }
+        }
+    }
+}
+
 /// Greyscale, contrast 1.2, multiplied by amber: the same steps as the Swift `Art` view.
 pub fn amber_art(image: &image::RgbImage) -> image::RgbImage {
     let mut out = image.clone();

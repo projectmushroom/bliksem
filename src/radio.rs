@@ -494,7 +494,8 @@ impl Render {
 }
 
 enum Target {
-    Device(cpal::Stream),
+    /// Held only to keep the sound running.
+    Device(#[allow(dead_code)] cpal::Stream),
     Silent(Arc<AtomicBool>, Option<JoinHandle<()>>),
 }
 
