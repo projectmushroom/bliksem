@@ -1,0 +1,29 @@
+#!/bin/sh
+# What the bar runs. Picks the player built for this machine, and says so out loud if it can't start or dies,
+# because the bar launches it detached and would otherwise show nothing at all.
+dir=$(dirname "$(readlink -f "$0")")
+arch=$(uname -m)
+player="$dir/$arch/bliksem"
+state="${XDG_STATE_HOME:-$HOME/.local/state}"
+log="$state/bliksem.log"
+
+complain() {
+  notify-send -u critical BLIKSEM "$1" 2>/dev/null
+  echo "bliksem: $1" >&2
+  exit 1
+}
+
+[ -x "$player" ] || complain "no player built for $arch. fok."
+
+case "${1:-show}" in
+  show | window) ;;
+  *) exec "$player" "$@" ;; # toggle, next, status and so on are quick and report their own errors
+esac
+
+mkdir -p "$state"
+"$player" "$@" 2>>"$log"
+code=$?
+case $code in
+  0 | 130 | 143) ;; # finished, or someone asked it to stop
+  *) complain "player died (exit $code). fok. see $log" ;;
+esac

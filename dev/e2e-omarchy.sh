@@ -20,9 +20,10 @@ cleanup() {
   kill "${FAKE:-}" "${REC:-}" 2>/dev/null
   [ -n "${SINK:-}" ] && pactl unload-module "$SINK" 2>/dev/null
   hyprctl output remove $OUT >/dev/null 2>&1
-  hyprctl eval "hl.dispatch(hl.dsp.focus({ monitor = 'eDP-1' }))" >/dev/null 2>&1
+  hyprctl eval "hl.dispatch(hl.dsp.focus({ monitor = '$HOME_MONITOR' }))" >/dev/null 2>&1
   rm -rf "$BLIKSEM_DATA" /tmp/bliksem-e2e.wav "$CAP"
 }
+HOME_MONITOR=$(hyprctl -j monitors | python3 -c 'import json,sys;print(next((m["name"] for m in json.load(sys.stdin) if m["focused"]),""))')
 trap cleanup EXIT
 python3 "$ROOT/dev/fake-icecast.py" "$ROOT/assets/test-tone.mp3" $PORT & FAKE=$!
 SINK=$(pactl load-module module-null-sink sink_name=bliksem_test sink_properties=node.description=bliksem_test)
