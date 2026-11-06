@@ -27,7 +27,8 @@ BarWidget {
     ? (track.length > maxTitle ? track.slice(0, maxTitle - 1) + "…" : track) : ""
 
   function run(word) {
-    Quickshell.execDetached([Quickshell.env("HOME") + "/.local/bin/bliksem", word])
+    // The player ships inside the plugin, where `omarchy plugin add` always puts it.
+    Quickshell.execDetached([Quickshell.env("HOME") + "/.config/omarchy/plugins/projectmushroom.bliksem/bin/bliksem", word])
   }
 
   implicitWidth: button.implicitWidth
