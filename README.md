@@ -1,40 +1,68 @@
 # BLIKSEM
 
-A DI.fm techno player for macOS that looks like your father's amber monitor.
-Text-mode UI on a real 9×16 VGA ROM font, phosphor bloom, scanlines, curved glass.
-Plays DI.fm streams, shows what every channel is playing, keeps your listening hours per channel,
-logs everything you heard, lets you like a tune and find it on Apple Music, Beatport, Bandcamp, Discogs or YouTube.
-System-wide Now Playing, media keys, menu bar.
+A DI.fm player on an amber CRT. One app for Mac and Omarchy Linux, in Rust.
 
-## Build
+The whole screen is a grid of characters in the IBM VGA ROM font, painted into a framebuffer and run through a CRT
+shader: curvature, phosphor glow, scanlines, vignette. Album art is pixelated and amber. All the copy is in
+`src/copy.rs`. Tune the swearing there.
 
-    ./build.sh && open .build/BLIKSEM.app
+You need a DI.fm premium listen key. DI allows one stream per key and the newest connection wins, so another device on
+your key will kick this one. BLIKSEM reconnects once, then tells you, rather than fighting it.
 
-Needs Xcode 26 on macOS 14 or later. No developer account needed, it's ad-hoc signed for your own Mac.
+## Install
 
-## Release
+**Omarchy:** needs Rust (`curl https://sh.rustup.rs | sh`), then:
 
-    ./release.sh 0.2.0
+```
+git clone https://github.com/projectmushroom/bliksem && cd bliksem && packaging/omarchy/install.sh
+```
 
-Builds a DMG, tags `v0.2.0` and publishes it as a GitHub release. The app is not notarized, so a DMG downloaded
-from GitHub trips Gatekeeper once: `xattr -d com.apple.quarantine /Applications/BLIKSEM.app`, or right-click › Open.
+That puts a bolt on your bar, an entry in the app launcher, and `bliksem` in `~/.local/bin`. It needs no root.
+`packaging/omarchy/install.sh uninstall` reverses it and leaves your key and history alone.
 
-## Key
+**Mac:** take the DMG from Releases. It is ad-hoc signed, so after dragging it to Applications run
+`xattr -d com.apple.quarantine /Applications/BLIKSEM.app`. First launch imports the old Swift app's key, favourites,
+likes and habits. To build it yourself: `packaging/mac/build.sh`.
 
-Paste your DI.fm listen key in the `key>` field (di.fm › settings › listen key). Without it nothing plays: DI no longer serves free streams to third-party players.
+## Use
 
-## Keys
-
-| key | does |
+| | |
 |---|---|
-| click a channel, or ↑ ↓ | play it |
-| space / ⌘P | stop and play |
-| ⌘L | like what's on |
-| ⌘F | find a channel |
-| ⌘1 – ⌘9 | your most listened channels |
-| ⌘+ ⌘- ⌘0 | zoom the whole screen |
+| `Space` | play or stop |
+| `↑` `↓` | hop channels |
+| `F`, `F11` | fullscreen, `Esc` to leave |
+| `Cmd`/`Ctrl` `+` `-` `0` | zoom |
+| `Cmd`/`Ctrl` `L` | like the track |
+| `Cmd`/`Ctrl` `F` | find a channel |
+| `Cmd`/`Ctrl` `1`-`9` | favourites, then most played |
+| `Cmd`/`Ctrl` `Q` | quit |
 
-## Credits
+`Ctrl` on Linux, because `Super` belongs to Hyprland. Everything is clickable too. Closing the window leaves the music
+playing.
 
-Font: Px437 IBM VGA 9x16 from [The Ultimate Oldschool PC Font Pack](https://int10h.org/oldschool-pc-fonts/) by VileR, CC BY-SA 4.0 (see FONT-LICENSE.txt).
-Stream data from DI.fm's AudioAddict API, which is unofficial and may change.
+**On the Omarchy bar:** click opens or hides the window, middle click plays or stops, scroll hops channels, right click
+likes the track.
+
+**From anywhere:** `bliksem toggle`, `next`, `prev`, `like`, `show`, `window`, `status`, `quit`. It also speaks MPRIS, so
+media keys and Omarchy's media widget work.
+
+## Develop
+
+```
+cargo test                         # fake DI server, silent output: no key, no sound, no window
+cargo run -- --demo                # the window with fake data, never connects
+cargo run -- --snap out.png        # render the real screen and shader to a PNG with no window
+cargo run -- --text                # the screen as plain text
+cargo run -- --bench 10            # frame cost with no screen
+dev/e2e-omarchy.sh                 # the full chain on Omarchy with no key and no sound, see the script
+```
+
+`BLIKSEM_DATA=/some/folder` keeps all saved data there, which also stops the Mac import. `--stream URL` plays that URL
+instead of asking DI, `--capture out.png` saves what the window was handed every 2 seconds, and `--trace` logs clicks
+and shortcuts. Don't run tests against the real stream without thinking: any connection with your key can stop your own
+music.
+
+Saved data is `~/.config/bliksem/state.json` on Linux and `~/Library/Application Support/BLIKSEM/state.json` on the Mac.
+It holds your key, so it is only readable by you.
+
+The old Swift app is in git history and the v0.3.0 release.

@@ -1,3 +1,4 @@
-.build/
-Bliksem.icns
+/target
 .DS_Store
+/.build
+*.icns
