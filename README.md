@@ -19,7 +19,7 @@ omarchy plugin add https://github.com/projectmushroom/omarchy-bliksem.git --enab
 
 That puts a bolt on your bar. Click it, paste your listen key with `Ctrl+V`, press `Enter`. It needs no root and no Rust.
 Update with `omarchy plugin update projectmushroom.bliksem`, remove with `omarchy plugin remove projectmushroom.bliksem`.
-That repo is the plugin and a prebuilt binary; `dev/publish-plugin.sh` produces it from this one. To build from source
+That repo is the plugin and prebuilt players for x86_64 and aarch64; `dev/publish-plugin.sh` builds each natively and fills it from this one. To build from source
 instead, needing Rust and this private repo, run `packaging/omarchy/install.sh`.
 
 **Mac:** take the DMG from Releases. It is ad-hoc signed, so after dragging it to Applications run
@@ -57,6 +57,7 @@ cargo run -- --snap out.png        # render the real screen and shader to a PNG 
 cargo run -- --text                # the screen as plain text
 cargo run -- --bench 10            # frame cost with no screen
 dev/e2e-omarchy.sh                 # the full chain on Omarchy with no key and no sound, see the script
+dev/test-launcher.sh               # the script the bar runs: right player, notification when it dies
 ```
 
 `BLIKSEM_DATA=/some/folder` keeps all saved data there, which also stops the Mac import. `--stream URL` plays that URL

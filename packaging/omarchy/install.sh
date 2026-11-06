@@ -24,12 +24,12 @@ fi
 command -v cargo >/dev/null || export PATH="$HOME/.cargo/bin:$PATH"
 (cd "$ROOT" && cargo build --release)
 mkdir -p "$(dirname "$BIN")" "$(dirname "$DESKTOP")" "$(dirname "$ICON")" "$PLUGIN"
-# A running copy keeps the old file open: swap it by rename rather than writing over it.
-install -m 755 "$ROOT/target/release/bliksem" "$BIN.new" && mv "$BIN.new" "$BIN"
 install -m 644 "$ROOT/assets/bliksem.svg" "$ICON"
 cp "$ROOT"/packaging/omarchy/projectmushroom.bliksem/* "$PLUGIN"/
-mkdir -p "$PLUGIN/bin"
-install -m 755 "$BIN" "$PLUGIN/bin/bliksem.new" && mv "$PLUGIN/bin/bliksem.new" "$PLUGIN/bin/bliksem"
+ARCH=$(uname -m)
+mkdir -p "$PLUGIN/bin/$ARCH"
+install -m 755 "$ROOT/target/release/bliksem" "$PLUGIN/bin/$ARCH/bliksem.new" && mv "$PLUGIN/bin/$ARCH/bliksem.new" "$PLUGIN/bin/$ARCH/bliksem"
+install -m 755 "$ROOT/packaging/omarchy/launcher" "$PLUGIN/bin/bliksem"
 cat > "$DESKTOP" <<D
 [Desktop Entry]
 Type=Application
@@ -40,6 +40,8 @@ Icon=$ICON
 Categories=AudioVideo;Audio;Player;
 StartupWMClass=bliksem
 D
+# The command line uses the same launcher as the bar. Beside the plugin, not in it: plugins can't hold symlinks.
+ln -sf "$PLUGIN/bin/bliksem" "$BIN"
 omarchy-plugin-validate "$PLUGIN"
 omarchy-shell -q shell rescanPlugins
 sleep 1
