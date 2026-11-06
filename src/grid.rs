@@ -85,8 +85,53 @@ impl Font {
         Self { glyphs }
     }
 
+    /// The glyph for a character, or its closest match. CP437 has no ø or š, and artist names are full of them.
     pub fn glyph(&self, ch: char) -> Option<&[u16; CELL_H]> {
-        self.glyphs.get(&ch)
+        self.glyphs.get(&ch).or_else(|| self.glyphs.get(&closest(ch))).or_else(|| self.glyphs.get(&'?'))
+    }
+}
+
+/// Latin letters the ROM font lacks, as their plain base letter. Spaces and controls stay blank elsewhere.
+fn closest(ch: char) -> char {
+    match ch {
+        'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' | 'ă' | 'ą' | 'ǎ' => 'a',
+        'À' | 'Á' | 'Â' | 'Ã' | 'Ä' | 'Å' | 'Ā' | 'Ă' | 'Ą' => 'A',
+        'ç' | 'ć' | 'ĉ' | 'ċ' | 'č' => 'c',
+        'Ç' | 'Ć' | 'Ĉ' | 'Ċ' | 'Č' => 'C',
+        'ď' | 'đ' | 'ð' => 'd',
+        'Ď' | 'Đ' | 'Ð' => 'D',
+        'è' | 'é' | 'ê' | 'ë' | 'ē' | 'ĕ' | 'ė' | 'ę' | 'ě' => 'e',
+        'È' | 'É' | 'Ê' | 'Ë' | 'Ē' | 'Ĕ' | 'Ė' | 'Ę' | 'Ě' => 'E',
+        'ĝ' | 'ğ' | 'ġ' | 'ģ' => 'g',
+        'Ĝ' | 'Ğ' | 'Ġ' | 'Ģ' => 'G',
+        'ì' | 'í' | 'î' | 'ï' | 'ĩ' | 'ī' | 'ĭ' | 'į' | 'ı' => 'i',
+        'Ì' | 'Í' | 'Î' | 'Ï' | 'Ĩ' | 'Ī' | 'Ĭ' | 'Į' | 'İ' => 'I',
+        'ķ' => 'k',
+        'Ķ' => 'K',
+        'ĺ' | 'ļ' | 'ľ' | 'ŀ' | 'ł' => 'l',
+        'Ĺ' | 'Ļ' | 'Ľ' | 'Ŀ' | 'Ł' => 'L',
+        'ñ' | 'ń' | 'ņ' | 'ň' => 'n',
+        'Ñ' | 'Ń' | 'Ņ' | 'Ň' => 'N',
+        'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ø' | 'ō' | 'ŏ' | 'ő' => 'o',
+        'Ò' | 'Ó' | 'Ô' | 'Õ' | 'Ö' | 'Ø' | 'Ō' | 'Ŏ' | 'Ő' => 'O',
+        'ŕ' | 'ŗ' | 'ř' => 'r',
+        'Ŕ' | 'Ŗ' | 'Ř' => 'R',
+        'ś' | 'ŝ' | 'ş' | 'š' | 'ș' => 's',
+        'Ś' | 'Ŝ' | 'Ş' | 'Š' | 'Ș' => 'S',
+        'ß' => 's',
+        'ţ' | 'ť' | 'ŧ' | 'ț' => 't',
+        'Ţ' | 'Ť' | 'Ŧ' | 'Ț' => 'T',
+        'ù' | 'ú' | 'û' | 'ü' | 'ũ' | 'ū' | 'ŭ' | 'ů' | 'ű' | 'ų' => 'u',
+        'Ù' | 'Ú' | 'Û' | 'Ü' | 'Ũ' | 'Ū' | 'Ŭ' | 'Ů' | 'Ű' | 'Ų' => 'U',
+        'ý' | 'ÿ' | 'ŷ' => 'y',
+        'Ý' | 'Ÿ' | 'Ŷ' => 'Y',
+        'ź' | 'ż' | 'ž' => 'z',
+        'Ź' | 'Ż' | 'Ž' => 'Z',
+        '‘' | '’' | '‚' | 'ʼ' | '´' | '`' => '\'',
+        '“' | '”' | '„' => '"',
+        '–' | '—' | '−' => '-',
+        '…' => '.',
+        _ => ch,
     }
 }
 
@@ -177,6 +222,17 @@ mod tests {
         assert_eq!(f.glyph('▀').unwrap()[0], 0x1ff);
         assert_eq!(f.glyph('▀').unwrap()[15], 0);
         assert_eq!(f.glyph('▄').unwrap()[15], 0x1ff);
+    }
+
+    /// Real artist names must never show a hole: every letter draws something.
+    #[test]
+    fn no_letter_draws_blank() {
+        let f = Font::load();
+        for ch in "Grössand Sørensen Dvořák Łukasz Žiga Björk Müller Óscar Beyoncé Çağrı Ştefan Tiësto ’ – … ñ 北".chars().filter(|c| *c != ' ') {
+            assert!(f.glyph(ch).is_some_and(|g| g.iter().any(|r| *r != 0)), "{ch} draws blank");
+        }
+        assert_eq!(f.glyph('ø'), f.glyph('o'));
+        assert_eq!(f.glyph('北'), f.glyph('?'), "anything else is a visible question mark");
     }
 
     #[test]

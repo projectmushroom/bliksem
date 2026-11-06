@@ -13,6 +13,7 @@ pollster = "1.0.1"
 rtrb = "0.4.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+souvlaki = { version = "0.9.3", default-features = false, features = ["use_zbus"] }
 symphonia = { version = "0.6.1", default-features = false, features = ["mp3"] }
 ureq = "3.5.1"
 wgpu = "30.0.1"
@@ -20,3 +21,4 @@ winit = "0.30.13"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 plist = "1"
+tray-icon = "0.26.1"

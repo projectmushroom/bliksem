@@ -1,20 +1,27 @@
 //! BLIKSEM: a DI.fm player on an amber CRT, one app for Mac and Linux.
 //!   bliksem                                  the player
+//!   bliksem toggle|next|prev|like|status|window|show|quit      drive the running player
 //!   bliksem --demo                           fake data and fake meters, never connects
 //!   bliksem --snap out.png [--size 1224x800] [--scale 2] [--zoom 1] [--t 1.0]    render the demo with no window
 //!   bliksem --text [--size 1224x800]         print the demo screen as text
 //!   bliksem --bench 10 [--size 1224x800]     measure full frames with no screen
 //!   bliksem --play URL [--seconds 10]        play one stream through the real output, printing levels
+//!   bliksem --import-check                   what first launch would import from the Swift app, as counts
+//!   --stream URL                             play this instead of asking DI, for testing with no key
 //!   --trace                                  log clicks and shortcuts, never typed text (that could be the key)
 //!   --capture out.png                        with a window: every 2 seconds, save exactly what it was handed
 mod app;
 mod copy;
 mod crt;
+mod ctl;
 mod di;
 mod grid;
+mod media;
 mod meter;
 mod radio;
 mod screen;
+#[cfg(target_os = "macos")]
+mod tray;
 
 use app::{App, Input, Outcome};
 use grid::*;
@@ -128,6 +135,10 @@ struct Player {
     wheel: f32,
     next: Instant,
     trace: bool,
+    wants_window_at_start: bool,
+    focused: bool,
+    #[cfg(target_os = "macos")]
+    tray: Option<tray::Tray>,
 }
 
 impl Player {
@@ -163,6 +174,38 @@ impl Player {
                 }
             }
         }
+    }
+
+    fn open_window(&mut self, el: &ActiveEventLoop) {
+        let attrs = Window::default_attributes().with_title(copy::APP).with_inner_size(LogicalSize::new(1224.0, 800.0)).with_min_inner_size(LogicalSize::new(960.0, 600.0));
+        #[cfg(target_os = "macos")]
+        let attrs = {
+            use winit::platform::macos::WindowAttributesExtMacOS;
+            attrs.with_titlebar_transparent(true).with_fullsize_content_view(true).with_title_hidden(true)
+        };
+        #[cfg(target_os = "linux")]
+        let attrs = {
+            use winit::platform::wayland::WindowAttributesExtWayland;
+            attrs.with_name("bliksem", "bliksem")
+        };
+        let window = Arc::new(el.create_window(attrs).expect("no window"));
+        let surface = self.instance.create_surface(window.clone()).expect("no surface");
+        let adapter = pollster::block_on(self.instance.request_adapter(&wgpu::RequestAdapterOptions { compatible_surface: Some(&surface), ..Default::default() })).expect("no gpu");
+        let caps = surface.get_capabilities(&adapter);
+        // Plain 8-bit, not the first non-sRGB format: Linux lists float and 10-bit surfaces, and those change the colours.
+        use wgpu::TextureFormat::{Bgra8Unorm, Bgra8UnormSrgb, Rgba8Unorm, Rgba8UnormSrgb};
+        let format = [Bgra8Unorm, Rgba8Unorm, Bgra8UnormSrgb, Rgba8UnormSrgb].into_iter().find(|f| caps.formats.contains(f)).unwrap_or(caps.formats[0]);
+        let crt = pollster::block_on(crt::Crt::new(&adapter, format));
+        let px = window.inner_size();
+        let mut config = surface.get_default_config(&adapter, px.width.max(1), px.height.max(1)).expect("surface not usable");
+        config.format = format;
+        // A hidden Wayland window gets no frame callbacks, and a blocking present would freeze the player's clock.
+        config.present_mode = wgpu::PresentMode::AutoNoVsync;
+        if self.capture.is_some() && caps.usages.contains(wgpu::TextureUsages::COPY_SRC) {
+            config.usage |= wgpu::TextureUsages::COPY_SRC;
+        }
+        surface.configure(&crt.device, &config);
+        self.live = Some(Live { window, surface, config, crt });
     }
 
     fn render(&mut self) {
@@ -224,38 +267,14 @@ impl Player {
 
 impl ApplicationHandler for Player {
     fn resumed(&mut self, el: &ActiveEventLoop) {
-        if self.live.is_some() {
-            return;
-        }
-        let attrs = Window::default_attributes().with_title(copy::APP).with_inner_size(LogicalSize::new(1224.0, 800.0)).with_min_inner_size(LogicalSize::new(960.0, 600.0));
         #[cfg(target_os = "macos")]
-        let attrs = {
-            use winit::platform::macos::WindowAttributesExtMacOS;
-            attrs.with_titlebar_transparent(true).with_fullsize_content_view(true).with_title_hidden(true)
-        };
-        #[cfg(target_os = "linux")]
-        let attrs = {
-            use winit::platform::wayland::WindowAttributesExtWayland;
-            attrs.with_name("bliksem", "bliksem")
-        };
-        let window = Arc::new(el.create_window(attrs).expect("no window"));
-        let surface = self.instance.create_surface(window.clone()).expect("no surface");
-        let adapter = pollster::block_on(self.instance.request_adapter(&wgpu::RequestAdapterOptions { compatible_surface: Some(&surface), ..Default::default() })).expect("no gpu");
-        let caps = surface.get_capabilities(&adapter);
-        // Plain 8-bit, not the first non-sRGB format: Linux lists float and 10-bit surfaces, and those change the colours.
-        use wgpu::TextureFormat::{Bgra8Unorm, Bgra8UnormSrgb, Rgba8Unorm, Rgba8UnormSrgb};
-        let format = [Bgra8Unorm, Rgba8Unorm, Bgra8UnormSrgb, Rgba8UnormSrgb].into_iter().find(|f| caps.formats.contains(f)).unwrap_or(caps.formats[0]);
-        let crt = pollster::block_on(crt::Crt::new(&adapter, format));
-        let px = window.inner_size();
-        let mut config = surface.get_default_config(&adapter, px.width.max(1), px.height.max(1)).expect("surface not usable");
-        config.format = format;
-        // A hidden Wayland window gets no frame callbacks, and a blocking present would freeze the player's clock.
-        config.present_mode = wgpu::PresentMode::AutoNoVsync;
-        if self.capture.is_some() && caps.usages.contains(wgpu::TextureUsages::COPY_SRC) {
-            config.usage |= wgpu::TextureUsages::COPY_SRC;
+        if self.tray.is_none() && !self.demo {
+            self.tray = tray::Tray::new();
         }
-        surface.configure(&crt.device, &config);
-        self.live = Some(Live { window, surface, config, crt });
+        if self.live.is_none() && self.wants_window_at_start {
+            self.wants_window_at_start = false;
+            self.open_window(el);
+        }
     }
 
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -263,7 +282,16 @@ impl ApplicationHandler for Player {
             return;
         }
         match event {
-            WindowEvent::CloseRequested => el.exit(),
+            WindowEvent::CloseRequested => {
+                // The music outlives the window. Nothing playing means nothing to stay for, except the Mac's menu bar item.
+                if self.app.wants_music() || cfg!(target_os = "macos") {
+                    self.live = None;
+                    self.focused = false;
+                } else {
+                    el.exit();
+                }
+            }
+            WindowEvent::Focused(f) => self.focused = f,
             WindowEvent::Resized(px) if px.width > 0 && px.height > 0 => {
                 let live = self.live.as_mut().unwrap();
                 live.config.width = px.width;
@@ -352,11 +380,33 @@ impl ApplicationHandler for Player {
         }
         let now = Instant::now();
         if now >= self.next {
-            if self.quit_at.is_some_and(|q| now >= q) {
+            if self.app.want_quit || self.quit_at.is_some_and(|q| now >= q) {
                 el.exit();
+            }
+            if std::mem::take(&mut self.app.flip_window) {
+                // The bar's click: open it, bring it up, or put it away.
+                if self.live.is_some() && self.focused {
+                    self.live = None;
+                    self.focused = false;
+                } else {
+                    self.app.want_window = true;
+                }
+            }
+            if std::mem::take(&mut self.app.want_window) {
+                match &self.live {
+                    Some(live) => live.window.focus_window(),
+                    None => self.open_window(el),
+                }
             }
             // The clock and the radio state run here, not in the paint, so they keep going while the window is hidden.
             self.app.update();
+            #[cfg(target_os = "macos")]
+            {
+                tray::Tray::poll(&mut self.app);
+                if let Some(t) = &mut self.tray {
+                    t.update(&self.app);
+                }
+            }
             if self.demo {
                 self.app.radio.meter.push_demo(self.start.elapsed().as_secs_f32());
             }
@@ -383,6 +433,26 @@ fn warm_up(app: &mut App, t: f32) {
 }
 
 fn main() {
+    // A word on its own drives the running player. `show` starts one if there isn't one.
+    let word = std::env::args().nth(1).filter(|w| ctl::COMMANDS.contains(&w.as_str()));
+    if let Some(reply) = word.as_deref().and_then(ctl::send) {
+        print!("{reply}");
+        return;
+    }
+    if word.as_deref().is_some_and(|w| w != "show" && w != "window") {
+        eprintln!("bliksem is not running");
+        std::process::exit(1);
+    }
+    let dev = ["--text", "--snap", "--play", "--bench", "--demo", "--import-check"].iter().any(|f| flag(f));
+    if !dev && word.is_none() && ctl::send("show").is_some() {
+        return; // already running: this just brought its window up
+    }
+
+    if flag("--import-check") {
+        println!("{}", app::import_check());
+        return;
+    }
+
     if flag("--text") {
         let size = size_arg();
         let (cols, rows) = grid_size(size, num("--zoom", 1.0));
@@ -434,10 +504,12 @@ fn main() {
     let el = EventLoop::new().expect("no event loop");
     // Wayland needs the display connection up front to create a surface.
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(Box::new(el.owned_display_handle())));
+    let mut opened = if demo { App::demo() } else { App::open() };
+    opened.stream_override = arg("--stream");
     let mut player = Player {
         instance,
         live: None,
-        app: if demo { App::demo() } else { App::open() },
+        app: opened,
         font: Font::load(),
         hits: Hits::default(),
         fb: vec![],
@@ -454,6 +526,10 @@ fn main() {
         wheel: 0.0,
         next: Instant::now(),
         trace: flag("--trace"),
+        wants_window_at_start: true,
+        focused: false,
+        #[cfg(target_os = "macos")]
+        tray: None,
     };
     el.run_app(&mut player).expect("event loop");
 }

@@ -193,6 +193,14 @@ fn import_from_defaults() -> Option<Saved> {
     Some(import_swift(blob, key, zoom, last))
 }
 
+/// Read-only: what first launch would bring across from the Swift app. Counts only, never the key itself.
+pub fn import_check() -> String {
+    match import_from_defaults() {
+        Some(s) => format!("key: {}, favourites: {}, likes: {}, heard: {}, channels with listening time: {}, zoom: {}, last channel: {:?}, slots: {:?}", if s.key.is_empty() { "none" } else { "yes" }, s.favs.len(), s.likes.len(), s.heard.len(), s.seconds.len(), s.zoom, s.last_channel, s.slots),
+        None => "nothing to import".into(),
+    }
+}
+
 #[cfg(not(target_os = "macos"))]
 fn import_from_defaults() -> Option<Saved> {
     None
@@ -257,6 +265,10 @@ pub enum Event {
     Art(String, image::RgbImage),
     Streams(i64, Result<Vec<String>, StreamError>),
     Apple(i64, Option<String>),
+    /// From the bar or the command line. The stream gets the reply.
+    Ctl(String, std::os::unix::net::UnixStream),
+    /// Media keys, the Omarchy bar, Control Center.
+    Remote(souvlaki::MediaControlEvent),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -341,6 +353,13 @@ pub struct App {
     pub started: Instant,
     /// Tests and renders never touch the network.
     pub offline: bool,
+    /// Asks the window code to act: bring up the window, flip it, or quit.
+    pub want_window: bool,
+    pub flip_window: bool,
+    pub want_quit: bool,
+    media: Option<crate::media::Media>,
+    /// Dev only: play this instead of asking DI, so the whole app can run with no key.
+    pub stream_override: Option<String>,
     dir: Option<PathBuf>,
     tx: Sender<Event>,
     rx: Receiver<Event>,
@@ -376,6 +395,11 @@ impl App {
             art: HashMap::new(),
             started: now,
             offline,
+            want_window: false,
+            flip_window: false,
+            want_quit: false,
+            media: None,
+            stream_override: None,
             dir,
             tx,
             rx,
@@ -396,6 +420,8 @@ impl App {
         let dir = data_dir();
         let saved = load(&dir);
         let mut app = Self::with(saved, Radio::new(Sink::Device), Some(dir), false);
+        crate::ctl::serve(app.tx.clone());
+        app.media = crate::media::Media::new(app.tx.clone());
         app.bg(|tx| {
             let channels = di::channels();
             if !channels.is_empty() {
@@ -596,6 +622,10 @@ impl App {
         self.saved.last_channel = Some(c.id);
         self.dirty = true;
         self.reveal = true;
+        if let Some(url) = self.stream_override.clone() {
+            self.handle(Event::Streams(c.id, Ok(vec![url])));
+            return;
+        }
         let key = self.key();
         if key.is_empty() {
             self.status = copy::NO_KEY.into();
@@ -707,6 +737,33 @@ impl App {
                     Err(StreamError::Network) => self.status = copy::DEAD.into(),
                 }
             }
+            Event::Remote(e) => {
+                use souvlaki::MediaControlEvent as M;
+                match e {
+                    M::Play if !self.wanted => self.toggle(),
+                    M::Pause | M::Stop => self.stop(),
+                    M::Toggle => self.toggle(),
+                    M::Next => self.hop(1),
+                    M::Previous => self.hop(-1),
+                    M::Raise => self.want_window = true,
+                    M::Quit => self.want_quit = true,
+                    _ => {}
+                }
+            }
+            Event::Ctl(command, mut stream) => {
+                use std::io::Write;
+                match command.as_str() {
+                    "show" => self.want_window = true,
+                    "window" => self.flip_window = true,
+                    "toggle" => self.toggle(),
+                    "next" => self.hop(1),
+                    "prev" => self.hop(-1),
+                    "like" => self.like_current(),
+                    "quit" => self.want_quit = true,
+                    _ => {}
+                }
+                let _ = writeln!(stream, "{}", self.status_json());
+            }
             Event::Apple(id, url) => {
                 if let Some(l) = self.saved.likes.iter_mut().find(|l| l.id == id) {
                     l.apple_state = if url.is_some() { "found" } else { "none" }.into();
@@ -715,6 +772,37 @@ impl App {
                 }
             }
         }
+    }
+
+    /// What `bliksem status` prints. Never includes the key.
+    pub fn status_json(&self) -> serde_json::Value {
+        let t = self.now_track();
+        serde_json::json!({
+            "playing": self.playing(),
+            "channel": self.current.as_ref().map(|c| c.name.clone()),
+            "artist": t.map(|t| t.artist()),
+            "title": t.map(|t| t.title()),
+            "status": self.status,
+            "liked": t.is_some_and(|t| self.is_liked(t.id)),
+        })
+    }
+
+    /// What the system's now playing shows, or nothing before a channel is picked.
+    pub fn now(&self) -> Option<crate::media::Now> {
+        let c = self.current.as_ref()?;
+        let t = self.now_track();
+        Some(crate::media::Now {
+            title: t.map_or(c.name.clone(), |t| t.title().to_string()),
+            artist: t.map_or("DI.FM".to_string(), |t| t.artist().to_string()),
+            album: format!("DI.FM {}", c.name),
+            cover: self.now_art_path().or(c.asset_url.as_deref()).map(|p| di::img(p, 600)),
+            playing: self.playing(),
+        })
+    }
+
+    /// Whether the music should keep going with the window closed.
+    pub fn wants_music(&self) -> bool {
+        self.wanted
     }
 
     /// Add the track to the heard log once, when it first shows up while playing.
@@ -777,6 +865,9 @@ impl App {
                     let _ = tx.send(Event::Art(url, crate::grid::amber_art(&image.to_rgb8())));
                 }
             });
+        }
+        if let (Some(now), true) = (self.now(), self.media.is_some()) {
+            self.media.as_mut().unwrap().update(now);
         }
         if self.dirty && self.last_save.elapsed().as_secs() >= 5 {
             self.save();
@@ -1186,6 +1277,36 @@ mod tests {
         assert!(s.collapsed.contains("rest"));
         assert_eq!(s.slots, [Module::Vu, Module::Habits]);
         assert_eq!((s.key.as_str(), s.zoom, s.last_channel), ("k", 1.5, Some(36)));
+    }
+
+    #[test]
+    fn media_keys_drive_the_player() {
+        use souvlaki::MediaControlEvent as M;
+        let mut a = app();
+        a.handle(Event::Remote(M::Next));
+        assert_eq!(a.current.as_ref().unwrap().id, 1);
+        a.handle(Event::Remote(M::Next));
+        assert_eq!(a.current.as_ref().unwrap().id, 2);
+        a.handle(Event::Remote(M::Previous));
+        assert_eq!(a.current.as_ref().unwrap().id, 1);
+        a.handle(Event::Remote(M::Raise));
+        assert!(a.want_window);
+        a.handle(Event::Remote(M::Quit));
+        assert!(a.want_quit);
+    }
+
+    #[test]
+    fn now_playing_falls_back_to_the_channel_and_status_never_holds_the_key() {
+        let mut a = app();
+        assert_eq!(a.now(), None);
+        a.saved.key = "supersecret".into();
+        a.current = a.channel(1);
+        assert_eq!(a.now().unwrap().title, "Techno");
+        a.on_air.insert(1, Track::new(7, "A", "T"));
+        let n = a.now().unwrap();
+        assert_eq!((n.title.as_str(), n.artist.as_str(), n.album.as_str()), ("T", "A", "DI.FM Techno"));
+        let s = a.status_json().to_string();
+        assert!(s.contains("\"title\":\"T\"") && !s.contains("supersecret"), "{s}");
     }
 
     #[test]

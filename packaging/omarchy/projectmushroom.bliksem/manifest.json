@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "projectmushroom.bliksem",
+  "name": "BLIKSEM",
+  "version": "1.0.0",
+  "author": "Project Mushroom",
+  "license": "MIT",
+  "description": "DI.fm on an amber CRT: a bolt on the bar with the current track.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {"barWidget": "BarWidget.qml"},
+  "barWidget": {
+    "displayName": "BLIKSEM",
+    "description": "Click opens the player. Middle click plays or stops. Scroll hops channels. Right click likes the track.",
+    "category": "Media",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {"maxTitle": 32},
+    "schema": [
+      {"key": "maxTitle", "type": "integer", "label": "Longest track text", "min": 0, "max": 80, "step": 4, "defaultValue": 32}
+    ]
+  }
+}
