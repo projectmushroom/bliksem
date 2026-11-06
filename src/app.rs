@@ -473,7 +473,11 @@ impl App {
         app.saved.likes.push(Liked { id: 1002, artist: "Sample Name".into(), title: "Concrete (Dub)".into(), channel: "Techno".into(), date: 1_793_990_000.0, art: None, apple: Some("https://example.com".into()), apple_state: "found".into() });
         app.current = app.channel(36);
         app.pretend = true;
-        let art = image::load_from_memory(include_bytes!("../assets/demo-art.png")).expect("demo art").to_rgb8();
+        // Drawn here, not a file: the binary is published, so it can't carry anyone's artwork.
+        let art = image::RgbImage::from_fn(96, 96, |x, y| {
+            let beam = 255u32.saturating_sub((x as i32 * 2 - y as i32 - 40).unsigned_abs() * 6);
+            image::Rgb([(beam + (x * y) % 40).min(255) as u8; 3])
+        });
         app.art.insert(di::img("//demo/art.png", 96), Arc::new(crate::grid::amber_art(&art)));
         app
     }

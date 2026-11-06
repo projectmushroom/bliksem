@@ -28,6 +28,8 @@ mkdir -p "$(dirname "$BIN")" "$(dirname "$DESKTOP")" "$(dirname "$ICON")" "$PLUG
 install -m 755 "$ROOT/target/release/bliksem" "$BIN.new" && mv "$BIN.new" "$BIN"
 install -m 644 "$ROOT/assets/bliksem.svg" "$ICON"
 cp "$ROOT"/packaging/omarchy/projectmushroom.bliksem/* "$PLUGIN"/
+mkdir -p "$PLUGIN/bin"
+install -m 755 "$BIN" "$PLUGIN/bin/bliksem.new" && mv "$PLUGIN/bin/bliksem.new" "$PLUGIN/bin/bliksem"
 cat > "$DESKTOP" <<D
 [Desktop Entry]
 Type=Application

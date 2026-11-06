@@ -11,14 +11,16 @@ your key will kick this one. BLIKSEM reconnects once, then tells you, rather tha
 
 ## Install
 
-**Omarchy:** needs Rust (`curl https://sh.rustup.rs | sh`), then:
+**Omarchy:**
 
 ```
-git clone https://github.com/projectmushroom/bliksem && cd bliksem && packaging/omarchy/install.sh
+omarchy plugin add https://github.com/projectmushroom/omarchy-bliksem.git --enable
 ```
 
-That puts a bolt on your bar, an entry in the app launcher, and `bliksem` in `~/.local/bin`. It needs no root.
-`packaging/omarchy/install.sh uninstall` reverses it and leaves your key and history alone.
+That puts a bolt on your bar. Click it, paste your listen key with `Ctrl+V`, press `Enter`. It needs no root and no Rust.
+Update with `omarchy plugin update projectmushroom.bliksem`, remove with `omarchy plugin remove projectmushroom.bliksem`.
+That repo is the plugin and a prebuilt binary; `dev/publish-plugin.sh` produces it from this one. To build from source
+instead, needing Rust and this private repo, run `packaging/omarchy/install.sh`.
 
 **Mac:** take the DMG from Releases. It is ad-hoc signed, so after dragging it to Applications run
 `xattr -d com.apple.quarantine /Applications/BLIKSEM.app`. First launch imports the old Swift app's key, favourites,

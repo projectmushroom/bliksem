@@ -1,13 +1,13 @@
 #!/bin/bash
 # Full chain on an Omarchy box with no key and no sound: real app, real decode, real PipeWire into an invisible sink,
 # real D-Bus and real bar, on a throwaway monitor. Everything it creates is removed on exit, and it works while locked.
-# Run ./install.sh first. Writes frames to /tmp/bliksem-e2e-*.png.
+# Install the plugin first, with `omarchy plugin add` or packaging/omarchy/install.sh. Writes frames to /tmp/bliksem-e2e-*.png.
 set -u
 export XDG_RUNTIME_DIR=/run/user/$(id -u) OMARCHY_PATH=${OMARCHY_PATH:-/usr/share/omarchy}
 export HYPRLAND_INSTANCE_SIGNATURE=$(ls "$XDG_RUNTIME_DIR/hypr" | head -1)
 export WAYLAND_DISPLAY=wayland-1 PATH=$OMARCHY_PATH/bin:$PATH
 export DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}
-ROOT=$(cd "$(dirname "$0")/.." && pwd); B=$HOME/.local/bin/bliksem; OUT=bliksem-test; PORT=18765
+ROOT=$(cd "$(dirname "$0")/.." && pwd); B=${BLIKSEM_BIN:-$HOME/.config/omarchy/plugins/projectmushroom.bliksem/bin/bliksem}; OUT=bliksem-test; PORT=18765
 export BLIKSEM_DATA=$(mktemp -d) PIPEWIRE_NODE=bliksem_test
 CAP=/tmp/bliksem-e2e-cap.png; FAILED=0
 check() { if [ "$2" = "$3" ]; then echo "ok    $1"; else echo "FAIL  $1: got '$2', wanted '$3'"; FAILED=1; fi; }
