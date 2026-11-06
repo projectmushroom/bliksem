@@ -23,7 +23,7 @@ pub struct Tray {
 impl Tray {
     /// Call once the event loop is running.
     pub fn new() -> Option<Self> {
-        let icon = TrayIconBuilder::new().with_icon(icon()?).with_icon_as_template(true).build().ok()?;
+        let icon = TrayIconBuilder::new().with_icon_templated(icon()?).build().ok()?;
         Some(Self { icon, last: String::new() })
     }
 
