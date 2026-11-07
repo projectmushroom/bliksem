@@ -18,7 +18,9 @@ const CURVE = 0.045;
 const PAD = vec2f(18.0, 30.0);
 const PAD_TOTAL = vec2f(36.0, 48.0);
 const RADIUS = 14.0;
-const BG = vec3f(0.07, 0.045, 0.03);
+const BG = vec3f(0.05, 0.033, 0.006);
+// The grid keeps headroom so BRIGHT can sit above AMBER on the same hue; this brings normal text back up.
+const GAIN = 1.33;
 
 @vertex
 fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
@@ -56,7 +58,7 @@ fn fs(@builtin(position) frag: vec4f) -> @location(0) vec4f {
         + screen(p + vec2f(r, r)) + screen(p + vec2f(-r, r)) + screen(p + vec2f(r, -r)) + screen(p + vec2f(-r, -r));
     glow += (screen(p + vec2f(2.0 * r, 0.0)) + screen(p + vec2f(-2.0 * r, 0.0)) + screen(p + vec2f(0.0, 2.0 * r)) + screen(p + vec2f(0.0, -2.0 * r))) * 0.5;
 
-    var col = screen(p) + glow * 0.07;
+    var col = (screen(p) + glow * 0.07) * GAIN;
     // SwiftUI runs this on the flat layer, one value per device pixel, and bends afterwards. Doing it on the bent
     // position instead draws moire arcs across solid areas. Too fine to resolve means a flat dim on every display.
     let period = u.zoom * u.scale;
@@ -65,6 +67,8 @@ fn fs(@builtin(position) frag: vec4f) -> @location(0) vec4f {
     col *= scan;
     let d = dot(uv, uv);
     col *= 1.0 - 0.22 * d * d;
+    // One phosphor: brightness tops out here. Clipping per channel would let green catch up and turn fills yellow.
+    col /= max(col.r, 1.0);
     if u.srgb > 0.5 { col = pow(max(col, vec3f(0.0)), vec3f(2.2)); }
     return vec4f(col, 1.0);
 }

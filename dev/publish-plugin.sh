@@ -4,6 +4,7 @@
 # The Apple Silicon machine uses 16K memory pages, so build there rather than cross-compiling from x86.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd); V=${1:?version}; OUT=${2:?clone of omarchy-bliksem}; shift 2
+grep -q "^version = \"$V\"" "$ROOT/Cargo.toml" || { echo "Cargo.toml doesn't say version $V: the app compares itself against the plugin's version"; exit 1; }
 HOSTS=("$@"); [ ${#HOSTS[@]} -gt 0 ] || HOSTS=(five6one@omarchy-mbp-15 projectmushroom@projectmushroom)
 SSH=(ssh -i "$HOME/.ssh/bliksem_build" -o IdentitiesOnly=yes -o BatchMode=yes)
 SRC=bliksem-publish # relative to the home folder on the build box

@@ -1,10 +1,12 @@
 //! BLIKSEM: a DI.fm player on an amber CRT, one app for Mac and Linux.
 //!   bliksem                                  the player
-//!   bliksem toggle|next|prev|like|status|window|show|quit      drive the running player
+//!   bliksem toggle|next|prev|like|status|update|window|show|quit      drive the running player
+//!   bliksem report                           everything needed to diagnose a problem, for an agent to read. No key
+//!   bliksem mark [what you heard]            note this moment in the log
 //!   bliksem --demo                           fake data and fake meters, never connects
-//!   bliksem --snap out.png [--size 1224x800] [--scale 2] [--zoom 1] [--t 1.0]    render the demo with no window
+//!   bliksem --snap out.png [--size 1224x800] [--scale 2] [--zoom 1] [--t 1.0] [--slots vu,wave]    render the demo with no window
 //!   bliksem --text [--size 1224x800]         print the demo screen as text
-//!   bliksem --bench 10 [--size 1224x800]     measure full frames with no screen
+//!   bliksem --bench 10 [--size 1224x800] [--slots vu,wave]    measure full frames with no screen
 //!   bliksem --play URL [--seconds 10]        play one stream through the real output, printing levels
 //!   bliksem --import-check                   what first launch would import from the Swift app, as counts
 //!   --stream URL                             play this instead of asking DI, for testing with no key
@@ -16,12 +18,14 @@ mod crt;
 mod ctl;
 mod di;
 mod grid;
+mod log;
 mod media;
 mod meter;
 mod radio;
 mod screen;
 #[cfg(target_os = "macos")]
 mod tray;
+mod update;
 
 use app::{App, Input, Outcome};
 use grid::*;
@@ -70,6 +74,42 @@ fn cell_at(pos: (f32, f32), size: (f32, f32), zoom: f32) -> Option<(usize, usize
         return None;
     }
     Some(((flat.0 / zoom) as usize / CELL_W, (flat.1 / zoom) as usize / CELL_H))
+}
+
+/// Brings the running window up. Wayland doesn't let a window focus itself without a token from whatever was clicked,
+/// and the bar doesn't have one, so on Linux the compositor gets asked directly.
+fn raise(window: &Window) {
+    window.focus_window();
+    if cfg!(target_os = "linux") {
+        std::thread::spawn(|| {
+            let ok = std::process::Command::new("hyprctl").args(["eval", "hl.dispatch(hl.dsp.focus({ window = 'class:^bliksem$' }))"]).output().is_ok_and(|o| o.status.success());
+            log::note("focus", serde_json::json!({ "ok": ok }));
+        });
+    }
+}
+
+/// Whether the window really is what you're looking at. Our own focus flag can be stale on Wayland when the window sits
+/// on another workspace, so ask the compositor first and only fall back to the flag where there isn't one to ask.
+fn in_front(focused: bool) -> bool {
+    if !cfg!(target_os = "linux") {
+        return focused;
+    }
+    match std::process::Command::new("hyprctl").args(["-j", "activewindow"]).output() {
+        Ok(o) if o.status.success() => is_ours(&String::from_utf8_lossy(&o.stdout)),
+        _ => focused,
+    }
+}
+
+fn is_ours(active_window: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(active_window).is_ok_and(|v| v["class"] == "bliksem")
+}
+
+/// Dev renders can show any modules.
+fn slots_arg(app: &mut App) {
+    if let Some(slots) = arg("--slots") {
+        let names: Vec<String> = slots.split(',').map(|s| format!("\"{s}\"")).collect();
+        app.saved.slots = serde_json::from_str(&format!("[{}]", names.join(","))).expect("--slots vu,wave,spectrum,scope,...");
+    }
 }
 
 /// Paints one whole frame in font pixels. Returns the framebuffer size.
@@ -137,6 +177,8 @@ struct Player {
     trace: bool,
     wants_window_at_start: bool,
     focused: bool,
+    /// Found at the start: once an update replaces the file, the system no longer gives its path back cleanly.
+    exe: std::path::PathBuf,
     #[cfg(target_os = "macos")]
     tray: Option<tray::Tray>,
 }
@@ -226,6 +268,7 @@ impl Player {
             }
         };
         let age = self.start.elapsed().as_secs_f32();
+        let painting = Instant::now();
         let (w, h) = frame(&mut self.app, &self.font, size, Some(age), &mut self.hits, &mut self.fb, &mut self.boot_fb);
         live.crt.upload(w, h, &self.fb);
         let view = output.texture.create_view(&Default::default());
@@ -250,12 +293,26 @@ impl Player {
             }
         }
         live.crt.queue.present(output);
+        if painting.elapsed() > Duration::from_millis(200) {
+            log::note("slow_frame", serde_json::json!({ "ms": painting.elapsed().as_millis() as u64 }));
+        }
         self.frames += 1;
         if self.report.elapsed() >= Duration::from_secs(5) && self.capture.is_some() {
             eprintln!("{:.1} fps, {}x{} px, zoom {}", self.frames as f32 / self.report.elapsed().as_secs_f32(), live.config.width, live.config.height, self.app.saved.zoom);
             self.frames = 0;
             self.report = Instant::now();
         }
+    }
+
+    /// Into the new version, in place: same process, same arguments, so whatever started it is still waiting on it.
+    fn restart(&mut self) {
+        use std::os::unix::process::CommandExt;
+        self.app.save();
+        self.app.radio.stop();
+        std::thread::sleep(Duration::from_millis(300)); // lets the sound fade out
+        let error = std::process::Command::new(&self.exe).args(std::env::args().skip(1)).exec();
+        log::note("update_run", serde_json::json!({ "ok": false, "said": format!("restart failed: {error}") }));
+        self.app.update_failed = true;
     }
 
     /// Smooth while anything moves, near idle when nothing does.
@@ -383,9 +440,12 @@ impl ApplicationHandler for Player {
             if self.app.want_quit || self.quit_at.is_some_and(|q| now >= q) {
                 el.exit();
             }
+            if std::mem::take(&mut self.app.want_restart) {
+                self.restart();
+            }
             if std::mem::take(&mut self.app.flip_window) {
                 // The bar's click: open it, bring it up, or put it away.
-                if self.live.is_some() && self.focused {
+                if self.live.is_some() && in_front(self.focused) {
                     self.live = None;
                     self.focused = false;
                 } else {
@@ -394,7 +454,7 @@ impl ApplicationHandler for Player {
             }
             if std::mem::take(&mut self.app.want_window) {
                 match &self.live {
-                    Some(live) => live.window.focus_window(),
+                    Some(live) => raise(&live.window),
                     None => self.open_window(el),
                 }
             }
@@ -426,13 +486,25 @@ fn warm_up(app: &mut App, t: f32) {
     for i in 0..512 {
         app.radio.meter.push_demo(t - (512 - i) as f32 * 0.05);
     }
-    for _ in 0..12 {
+    for i in 0..12 {
+        app.radio.meter.push_demo(t - (12 - i) as f32 * 0.05);
         app.needle.step(&app.radio.meter);
+        // Throwaway frames, so spectrum caps and the scope's trail have some history.
+        screen::draw(&mut Grid::new(160, 60), app, &mut Hits::default());
         std::thread::sleep(Duration::from_millis(15));
     }
 }
 
 fn main() {
+    match std::env::args().nth(1).as_deref() {
+        Some("report") => return print!("{}", log::report()),
+        Some("mark") => {
+            let what = std::env::args().skip(2).collect::<Vec<_>>().join(" ");
+            log::note("user_mark", serde_json::json!({ "what": what }));
+            return println!("marked in {}", log::path().display());
+        }
+        _ => {}
+    }
     // A word on its own drives the running player. `show` starts one if there isn't one.
     let word = std::env::args().nth(1).filter(|w| ctl::COMMANDS.contains(&w.as_str()));
     if let Some(reply) = word.as_deref().and_then(ctl::send) {
@@ -469,6 +541,7 @@ fn main() {
         let scale = num("--scale", 2.0);
         let mut app = App::demo();
         app.saved.zoom = num("--zoom", 1.0);
+        slots_arg(&mut app);
         warm_up(&mut app, num("--t", 1.0));
         let (font, mut fb, mut boot_fb) = (Font::load(), vec![], vec![]);
         let boot_age = arg("--boot").and_then(|v| v.parse().ok());
@@ -528,6 +601,7 @@ fn main() {
         trace: flag("--trace"),
         wants_window_at_start: true,
         focused: false,
+        exe: std::env::current_exe().expect("no path to myself"),
         #[cfg(target_os = "macos")]
         tray: None,
     };
@@ -555,6 +629,7 @@ async fn bench(size: (f32, f32), scale: f32, zoom: f32, secs: f32) {
     let view = target.create_view(&Default::default());
     let (mut app, font, mut hits, mut boot_fb) = (App::demo(), Font::load(), Hits::default(), vec![]);
     app.saved.zoom = zoom;
+    slots_arg(&mut app);
     let (start, mut fb, mut frames, mut paint_ms, mut total_ms) = (Instant::now(), vec![], 0u32, 0.0, 0.0);
     while start.elapsed().as_secs_f32() < secs {
         let t0 = Instant::now();
@@ -581,6 +656,7 @@ mod tests {
     #[test]
     fn headless_render_has_black_corners_and_only_amber() {
         let (mut app, font, mut hits, mut fb, mut boot_fb) = (App::demo(), Font::load(), Hits::default(), vec![], vec![]);
+        app.radio.meter.push_demo(1.0);
         let size = (1224.0, 800.0);
         let (w, h) = frame(&mut app, &font, size, None, &mut hits, &mut fb, &mut boot_fb);
         assert_eq!((w, h), (132 * 9, 47 * 16));
@@ -594,6 +670,19 @@ mod tests {
         let lit = px.chunks(4).filter(|p| p[0] > 120).count();
         assert!(lit > 20_000, "screen should be lit, got {lit}");
         assert!(px.chunks(4).all(|p| p[0] >= p[1] && p[1] >= p[2]), "only amber: red >= green >= blue everywhere");
+        // One hue from dim text to full-on fills: this is what catches bloom sliding bright areas towards yellow.
+        for p in px.chunks(4).filter(|p| p[0] >= 64) {
+            let g = p[1] as f32 / p[0] as f32;
+            assert!((g - 168.0 / 255.0).abs() < 0.03, "off hue: {p:?}");
+        }
+    }
+
+    #[test]
+    fn the_compositor_decides_whose_window_is_active() {
+        assert!(is_ours(r#"{"class":"bliksem","title":"BLIKSEM"}"#));
+        assert!(!is_ours(r#"{"class":"kitty"}"#));
+        assert!(!is_ours("{}"), "nothing focused");
+        assert!(!is_ours("Invalid"));
     }
 
     #[test]

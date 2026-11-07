@@ -73,7 +73,7 @@ fn agent() -> ureq::Agent {
     ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(10))).build().into()
 }
 
-fn text(url: &str) -> Result<String, ureq::Error> {
+pub fn text(url: &str) -> Result<String, ureq::Error> {
     agent().get(url).call()?.body_mut().read_to_string()
 }
 

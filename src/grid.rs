@@ -2,12 +2,22 @@
 use std::collections::HashMap;
 
 pub type Rgb = [u8; 3];
-pub const AMBER: Rgb = [255, 168, 31];
-pub const BRIGHT: Rgb = [255, 209, 89];
-pub const DIM: Rgb = [153, 97, 20];
-pub const BG: Rgb = [18, 11, 8];
-/// Dim at 35% over the background: the unlit VU segments.
-pub const OFF: Rgb = [65, 41, 12];
+
+/// One phosphor: every colour on screen is this one at some brightness, so nothing can drift to another yellow.
+const fn shade(percent: u32) -> Rgb {
+    [(255 * percent / 100) as u8, (168 * percent / 100) as u8, (31 * percent / 100) as u8]
+}
+pub const BRIGHT: Rgb = shade(100);
+pub const AMBER: Rgb = shade(75);
+pub const DIM: Rgb = shade(45);
+/// The unlit VU segments.
+pub const OFF: Rgb = shade(16);
+pub const BG: Rgb = shade(5);
+
+/// The phosphor at any brightness from 0 to 1, for gradients.
+pub fn glow(v: f32) -> Rgb {
+    BRIGHT.map(|c| (c as f32 * v.clamp(0.0, 1.0)) as u8)
+}
 pub const CELL_W: usize = 9;
 pub const CELL_H: usize = 16;
 
@@ -22,11 +32,20 @@ pub struct Grid {
     pub cols: usize,
     pub rows: usize,
     pub cells: Vec<Cell>,
+    /// Single font pixels painted over the cells, for what a character can't draw. Index, then colour.
+    pub dots: Vec<(usize, Rgb)>,
 }
 
 impl Grid {
     pub fn new(cols: usize, rows: usize) -> Self {
-        Self { cols, rows, cells: vec![Cell { ch: ' ', fg: AMBER, bg: BG }; cols * rows] }
+        Self { cols, rows, cells: vec![Cell { ch: ' ', fg: AMBER, bg: BG }; cols * rows], dots: vec![] }
+    }
+
+    /// One font pixel, clipped to the screen.
+    pub fn dot(&mut self, x: usize, y: usize, c: Rgb) {
+        if x < self.cols * CELL_W && y < self.rows * CELL_H {
+            self.dots.push((y * self.cols * CELL_W + x, c));
+        }
     }
 
     pub fn put(&mut self, x: usize, y: usize, s: &str, fg: Rgb) {
@@ -150,10 +169,13 @@ pub fn paint(grid: &Grid, font: &Font, out: &mut Vec<u8>) {
             }
         }
     }
+    for (at, c) in &grid.dots {
+        out[at * 4..][..3].copy_from_slice(c);
+    }
 }
 
-/// Dim at 25% over the background: where the art goes until it arrives.
-pub const ART_WAITING: Rgb = [52, 32, 11];
+/// Where the art goes until it arrives.
+pub const ART_WAITING: Rgb = shade(20);
 
 pub fn fill(out: &mut [u8], fb_width: usize, (x, y, w, h): (usize, usize, usize, usize), c: Rgb) {
     for dy in 0..h {
@@ -184,7 +206,7 @@ pub fn amber_art(image: &image::RgbImage) -> image::RgbImage {
         let luma = (0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32) / 255.0;
         let v = ((luma - 0.5) * 1.2 + 0.5).clamp(0.0, 1.0);
         for i in 0..3 {
-            p[i] = (v * AMBER[i] as f32) as u8;
+            p[i] = (v * BRIGHT[i] as f32) as u8;
         }
     }
     out
@@ -249,12 +271,32 @@ mod tests {
     }
 
     #[test]
+    fn every_shade_is_the_same_hue() {
+        for c in [BRIGHT, AMBER, DIM, OFF, ART_WAITING, glow(0.33)] {
+            let (g, b) = (c[1] as f32 / c[0] as f32, c[2] as f32 / c[0] as f32);
+            assert!((g - 168.0 / 255.0).abs() < 0.03 && (b - 31.0 / 255.0).abs() < 0.03, "{c:?}");
+        }
+    }
+
+    #[test]
+    fn dots_paint_over_cells_and_clip() {
+        let mut g = Grid::new(2, 1);
+        g.dot(10, 3, BRIGHT);
+        g.dot(18, 0, BRIGHT);
+        g.dot(0, 16, BRIGHT);
+        assert_eq!(g.dots.len(), 1, "off the grid is dropped");
+        let mut out = vec![];
+        paint(&g, &Font::load(), &mut out);
+        assert_eq!(out[(3 * 18 + 10) * 4..][..3], BRIGHT);
+    }
+
+    #[test]
     fn art_is_amber_with_no_colour_left() {
         let mut img = image::RgbImage::new(2, 2);
         img.put_pixel(0, 0, image::Rgb([0, 0, 255]));
         img.put_pixel(1, 0, image::Rgb([255, 255, 255]));
         let a = amber_art(&img);
-        assert_eq!(a.get_pixel(1, 0).0, AMBER);
+        assert_eq!(a.get_pixel(1, 0).0, BRIGHT);
         let p = a.get_pixel(0, 0).0;
         assert!(p[0] >= p[1] && p[1] >= p[2], "still has blue: {p:?}");
     }

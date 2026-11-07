@@ -1,10 +1,12 @@
 //! Plays a DI stream through exactly one socket per play, because DI allows one stream per key and the newest wins.
 //! Hopping waits for the old socket to close before opening the new one, so we never kick ourselves.
+use crate::log::note;
 use crate::meter::{Blocks, Meter};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream, ToSocketAddrs};
+use serde_json::json;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -157,6 +159,30 @@ impl Drop for Radio {
 struct Flow {
     started: AtomicBool,
     lost: AtomicBool,
+    /// The output is going away: fade out, then say so.
+    closing: AtomicBool,
+    faded: AtomicBool,
+    // Counted where they happen, written out by `report`: the audio thread must not touch the disk.
+    xruns: AtomicU32,
+    dry: AtomicU32,
+    clips: AtomicU32,
+    decode_errors: AtomicU32,
+    late_ms: AtomicU32,
+}
+
+impl Flow {
+    fn report(&self) {
+        let [xruns, dry, clips, decode_errors, late_ms] = [&self.xruns, &self.dry, &self.clips, &self.decode_errors, &self.late_ms].map(|n| n.swap(0, Relaxed));
+        if xruns + dry + clips + decode_errors + late_ms > 0 {
+            note("audio_health", json!({ "xruns": xruns, "dry": dry, "clips": clips, "decode_errors": decode_errors, "late_ms": late_ms }));
+        }
+    }
+}
+
+/// An underrun is a blip the output recovers from by itself. Treating it as a lost device rebuilt the output and
+/// reconnected the stream, turning one small glitch into a big one.
+fn fatal(kind: cpal::ErrorKind) -> bool {
+    !matches!(kind, cpal::ErrorKind::Xrun | cpal::ErrorKind::RealtimeDenied)
 }
 
 struct Ctx {
@@ -172,8 +198,10 @@ impl Ctx {
     fn set(&self, s: State) {
         // Under the lock, so a worker that was cancelled can never overwrite the state of its replacement.
         let mut state = self.shared.state.lock().unwrap();
-        if !self.cancel.fired() {
+        if !self.cancel.fired() && *state != s {
             *state = s;
+            drop(state);
+            note("state", json!({ "state": format!("{s:?}") }));
         }
     }
     fn state(&self) -> State {
@@ -203,6 +231,19 @@ enum End {
     Cancelled,
 }
 
+impl End {
+    fn describe(&self) -> serde_json::Value {
+        match self {
+            End::Refused => json!({ "why": "refused" }),
+            End::Failed => json!({ "why": "failed" }),
+            End::Cut { lasted, got_audio } => json!({ "why": "cut", "lasted_s": lasted.as_secs(), "got_audio": got_audio }),
+            End::OutputLost => json!({ "why": "output_lost" }),
+            End::NoDevice => json!({ "why": "no_device" }),
+            End::Cancelled => json!({ "why": "cancelled" }),
+        }
+    }
+}
+
 fn run(urls: Vec<String>, ctx: &Ctx) {
     let t = &ctx.timing;
     let (mut server, mut attempts, mut refusals, mut kicks) = (0usize, 0usize, 0usize, 0u32);
@@ -216,7 +257,11 @@ fn run(urls: Vec<String>, ctx: &Ctx) {
             *attempts += 1;
             d
         };
-        let delay = match session(&urls[server % urls.len()], ctx, &mut output, &mut attempts, &mut refusals) {
+        let end = session(&urls[server % urls.len()], ctx, &mut output, &mut attempts, &mut refusals);
+        if !matches!(end, End::Cancelled) {
+            note("stream_end", end.describe());
+        }
+        let delay = match end {
             End::Cancelled => return,
             End::NoDevice => return ctx.set(State::NoAudio),
             End::OutputLost => {
@@ -369,6 +414,7 @@ fn session(url: &str, ctx: &Ctx, output: &mut Option<Output>, attempts: &mut usi
         Err(_) if ctx.cancel.fired() => return End::Cancelled,
         Err(_) => return End::Failed,
     };
+    note("stream_open", json!({ "status": status }));
     match status {
         200 => {}
         401 | 403 => return End::Refused,
@@ -411,6 +457,7 @@ fn decode(body: Body, ctx: &Ctx, output: &mut Option<Output>, refusals: &mut usi
     let Ok(mut decoder) = symphonia::default::get_codecs().make_audio_decoder(params, &AudioDecoderOptions::default()) else { return Ok(false) };
 
     let (mut got_audio, mut interleaved, mut stereo) = (false, Vec::<f32>::new(), Vec::<f32>::new());
+    let mut reported = Instant::now();
     loop {
         let packet = match format.next_packet() {
             Ok(Some(p)) => p,
@@ -421,7 +468,11 @@ fn decode(body: Body, ctx: &Ctx, output: &mut Option<Output>, refusals: &mut usi
         }
         let audio = match decoder.decode(&packet) {
             Ok(a) => a,
-            Err(DecodeError::DecodeError(_)) => continue, // one bad frame on a live stream is not worth a reconnect
+            Err(DecodeError::DecodeError(_)) => {
+                // One bad frame on a live stream is not worth a reconnect.
+                ctx.flow.decode_errors.fetch_add(1, Relaxed);
+                continue;
+            }
             Err(_) => return Ok(got_audio),
         };
         let rate = audio.spec().rate();
@@ -443,6 +494,10 @@ fn decode(body: Body, ctx: &Ctx, output: &mut Option<Output>, refusals: &mut usi
         }
         got_audio = true;
         *refusals = 0;
+        if reported.elapsed() >= Duration::from_secs(10) {
+            reported = Instant::now();
+            ctx.flow.report();
+        }
         if !ctx.flow.started.load(Relaxed) && out.queued_secs() >= ctx.timing.preroll {
             ctx.flow.started.store(true, Relaxed);
         }
@@ -465,22 +520,52 @@ struct Render {
     shared: Arc<Shared>,
     meter: Arc<Meter>,
     blocks: Blocks,
+    rate: u32,
+    /// How far up the fade is, 0 to 1. Sound never starts or stops at full level: that step is the pop.
+    gain: f32,
+    last: (f32, f32),
+    called: Option<Instant>,
 }
 
+const FADE_SECS: f32 = 0.02;
+
 impl Render {
+    fn new(consumer: Consumer<f32>, ctx: &Ctx, rate: u32) -> Self {
+        Self { consumer, flow: ctx.flow.clone(), shared: ctx.shared.clone(), meter: ctx.meter.clone(), blocks: Blocks::new(rate), rate, gain: 0.0, last: (0.0, 0.0), called: None }
+    }
+
     fn fill(&mut self, out: &mut [f32], channels: usize) {
+        let now = Instant::now();
+        if let Some(previous) = self.called {
+            let (gap, expected) = (now.duration_since(previous).as_secs_f32(), (out.len() / channels.max(1)) as f32 / self.rate as f32);
+            if gap > expected * 2.0 {
+                self.flow.late_ms.fetch_max((gap * 1000.0) as u32, Relaxed);
+            }
+        }
+        self.called = Some(now);
+        let step = 1.0 / (self.rate as f32 * FADE_SECS);
         for frame in out.chunks_mut(channels) {
-            let mut sample = (0.0, 0.0);
             if self.flow.started.load(Relaxed) {
                 if self.consumer.slots() >= 2 {
-                    sample = (self.consumer.pop().unwrap_or(0.0), self.consumer.pop().unwrap_or(0.0));
-                    self.blocks.add(sample.0, sample.1, &self.meter);
+                    self.last = (self.consumer.pop().unwrap_or(0.0), self.consumer.pop().unwrap_or(0.0));
+                    self.blocks.add(self.last.0, self.last.1, &self.meter);
                     self.shared.frames.fetch_add(1, Relaxed);
+                    if self.last.0.abs() > 1.0 || self.last.1.abs() > 1.0 {
+                        self.flow.clips.fetch_add(1, Relaxed);
+                    }
                 } else {
                     // Ran dry: hold until there is enough to play smoothly again.
                     self.flow.started.store(false, Relaxed);
+                    self.flow.dry.fetch_add(1, Relaxed);
                 }
             }
+            let closing = self.flow.closing.load(Relaxed);
+            let up = self.flow.started.load(Relaxed) && !closing;
+            self.gain = if up { (self.gain + step).min(1.0) } else { (self.gain - step).max(0.0) };
+            if closing && self.gain == 0.0 {
+                self.flow.faded.store(true, Relaxed);
+            }
+            let sample = (self.last.0 * self.gain, self.last.1 * self.gain);
             match frame {
                 [mono] => *mono = (sample.0 + sample.1) * 0.5,
                 [l, r, rest @ ..] => {
@@ -506,7 +591,35 @@ struct Output {
     phase: f64,
     last: (f32, f32),
     device_id: Option<String>,
+    flow: Arc<Flow>,
     _target: Target,
+}
+
+impl Drop for Output {
+    /// Fades before the stream goes, so stopping or hopping never cuts the sound off mid-wave.
+    fn drop(&mut self) {
+        self.flow.closing.store(true, Relaxed);
+        let start = Instant::now();
+        while !self.flow.faded.load(Relaxed) && start.elapsed() < Duration::from_millis(300) {
+            thread::sleep(Duration::from_millis(5));
+        }
+        if matches!(self._target, Target::Device(_)) {
+            // What the callback already handed over still has to play out.
+            thread::sleep(Duration::from_secs_f32(2.0 * PERIOD as f32 / self.rate as f32));
+        }
+        self.flow.report();
+    }
+}
+
+/// Frames per callback on Linux. About 46 ms, twice the usual: a music player has no use for low latency, and ordinary
+/// thread scheduling can miss a much tighter deadline while the screen draws. Hold it to the size the device offers.
+const PERIOD: u32 = 2048;
+
+fn steady_buffer(range: &cpal::SupportedBufferSize) -> cpal::BufferSize {
+    match range {
+        cpal::SupportedBufferSize::Range { min, max } if cfg!(target_os = "linux") && *min <= PERIOD && PERIOD * 2 <= *max => cpal::BufferSize::Fixed(PERIOD),
+        _ => cpal::BufferSize::Default,
+    }
 }
 
 impl Drop for Target {
@@ -524,29 +637,48 @@ impl Output {
     fn new(ctx: &Ctx, source_rate: u32) -> Option<Self> {
         ctx.flow.started.store(false, Relaxed);
         ctx.flow.lost.store(false, Relaxed);
+        ctx.flow.closing.store(false, Relaxed);
+        ctx.flow.faded.store(false, Relaxed);
         let open_device = || -> Option<(cpal::Device, cpal::StreamConfig)> {
             let device = cpal::default_host().default_output_device()?;
             // Prefer the stream's own rate so nothing gets resampled.
             let exact = device.supported_output_configs().ok()?.find(|c| c.sample_format() == cpal::SampleFormat::F32 && c.channels() == 2 && c.min_sample_rate() <= source_rate && source_rate <= c.max_sample_rate());
-            let config: cpal::StreamConfig = match exact {
-                Some(c) => c.with_sample_rate(source_rate).config(),
-                None => device.default_output_config().ok()?.config(),
+            let (mut config, range): (cpal::StreamConfig, _) = match exact {
+                Some(c) => {
+                    let range = *c.buffer_size();
+                    (c.with_sample_rate(source_rate).config(), range)
+                }
+                None => {
+                    let c = device.default_output_config().ok()?;
+                    let range = *c.buffer_size();
+                    (c.config(), range)
+                }
             };
+            config.buffer_size = steady_buffer(&range);
             Some((device, config))
         };
         let device = if ctx.sink == Sink::Device { Some(open_device()?) } else { None };
         let rate = device.as_ref().map_or(source_rate, |(_, c)| c.sample_rate);
         ctx.shared.rate.store(rate, Relaxed);
         let (producer, consumer) = RingBuffer::new(rate as usize * 2 * 6);
-        let mut render = Render { consumer, flow: ctx.flow.clone(), shared: ctx.shared.clone(), meter: ctx.meter.clone(), blocks: Blocks::new(rate) };
+        let mut render = Render::new(consumer, ctx, rate);
         let (target, device_id) = match device {
             Some((device, config)) => {
                 let channels = config.channels as usize;
                 let flow = ctx.flow.clone();
-                let id = device.id().ok().map(|i| i.to_string());
-                let stream = device
-                    .build_output_stream(config, move |data: &mut [f32], _: &cpal::OutputCallbackInfo| render.fill(data, channels), move |_| flow.lost.store(true, Relaxed), None)
-                    .ok()?;
+                let name = device.id().ok().map(|i| i.to_string());
+                note("audio_open", json!({ "device": name, "source_rate": source_rate, "rate": rate, "channels": channels, "buffer": format!("{:?}", config.buffer_size) }));
+                // Linux follows the system output by itself through PipeWire, so only the Mac needs to watch for changes.
+                let id = name.filter(|_| cfg!(target_os = "macos"));
+                let on_error = move |e: cpal::Error| {
+                    if fatal(e.kind()) {
+                        note("output_lost", json!({ "kind": format!("{:?}", e.kind()) }));
+                        flow.lost.store(true, Relaxed);
+                    } else if e.kind() == cpal::ErrorKind::Xrun {
+                        flow.xruns.fetch_add(1, Relaxed);
+                    }
+                };
+                let stream = device.build_output_stream(config, move |data: &mut [f32], _: &cpal::OutputCallbackInfo| render.fill(data, channels), on_error, None).ok()?;
                 stream.play().ok()?;
                 (Target::Device(stream), id)
             }
@@ -566,7 +698,7 @@ impl Output {
                 (Target::Silent(stop, Some(handle)), None)
             }
         };
-        Some(Self { producer, source_rate, rate, phase: 0.0, last: (0.0, 0.0), device_id, _target: target })
+        Some(Self { producer, source_rate, rate, phase: 0.0, last: (0.0, 0.0), device_id, flow: ctx.flow.clone(), _target: target })
     }
 
     fn queued_secs(&self) -> f32 {
@@ -607,6 +739,70 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     const TONE: &[u8] = include_bytes!("../assets/test-tone.mp3");
+
+    fn render_with_loud_audio() -> (Render, Producer<f32>, Arc<Flow>) {
+        let (producer, consumer) = RingBuffer::new(44100 * 2);
+        let shared = Arc::new(Shared { state: Mutex::new(State::Idle), frames: AtomicU64::new(0), rate: AtomicU32::new(44100) });
+        let ctx = Ctx { cancel: Arc::default(), shared, meter: Arc::default(), timing: Timing::default(), sink: Sink::Silent, flow: Arc::default() };
+        (Render::new(consumer, &ctx, 44100), producer, ctx.flow.clone())
+    }
+
+    /// The biggest jump between neighbouring samples. Full-scale audio jumping straight from silence would be 1.0.
+    fn biggest_step(start: f32, out: &[f32]) -> f32 {
+        out.chunks(2).fold((start, 0f32), |(last, big), f| (f[0], big.max((f[0] - last).abs()))).1
+    }
+
+    #[test]
+    fn sound_fades_in_and_out_instead_of_popping() {
+        let (mut r, mut p, flow) = render_with_loud_audio();
+        for _ in 0..44100 {
+            let _ = p.push(1.0);
+        }
+        flow.started.store(true, Relaxed);
+        let mut out = vec![0.0; 4410];
+        r.fill(&mut out, 2);
+        assert!(biggest_step(0.0, &out) < 0.01, "starts gently: {}", biggest_step(0.0, &out));
+        assert_eq!(out[out.len() - 2], 1.0, "reaches full level");
+
+        flow.closing.store(true, Relaxed);
+        let mut out = vec![1.0; 4410];
+        r.fill(&mut out, 2);
+        assert!(biggest_step(1.0, &out) < 0.01, "stops gently: {}", biggest_step(1.0, &out));
+        assert_eq!(out[out.len() - 2], 0.0);
+        assert!(flow.faded.load(Relaxed), "lets the output go away");
+    }
+
+    #[test]
+    fn running_dry_fades_and_is_counted() {
+        let (mut r, mut p, flow) = render_with_loud_audio();
+        for _ in 0..4000 {
+            let _ = p.push(1.0);
+        }
+        flow.started.store(true, Relaxed);
+        let mut out = vec![0.0; 8000];
+        r.fill(&mut out, 2);
+        assert!(biggest_step(0.0, &out) < 0.01, "no click where the audio runs out: {}", biggest_step(0.0, &out));
+        assert_eq!(flow.dry.load(Relaxed), 1);
+        assert!(!flow.started.load(Relaxed));
+    }
+
+    #[test]
+    fn samples_over_full_scale_are_counted() {
+        let (mut r, mut p, flow) = render_with_loud_audio();
+        for v in [0.5, 0.5, 1.2, -1.2] {
+            let _ = p.push(v);
+        }
+        flow.started.store(true, Relaxed);
+        r.fill(&mut [0.0; 4], 2);
+        assert_eq!(flow.clips.load(Relaxed), 1);
+    }
+
+    #[test]
+    fn an_underrun_is_not_a_lost_device() {
+        assert!(!fatal(cpal::ErrorKind::Xrun));
+        assert!(!fatal(cpal::ErrorKind::RealtimeDenied));
+        assert!(fatal(cpal::ErrorKind::DeviceNotAvailable));
+    }
 
     /// A local stand-in for DI's Icecast, so playback tests never touch a real key or stream.
     struct Fake {

@@ -14,9 +14,9 @@
     "category": "Media",
     "allowMultiple": false,
     "defaultSection": "right",
-    "defaults": {"maxTitle": 32},
+    "defaults": {"maxTitle": 20},
     "schema": [
-      {"key": "maxTitle", "type": "integer", "label": "Longest track text", "min": 0, "max": 80, "step": 4, "defaultValue": 32}
+      {"key": "maxTitle", "type": "integer", "label": "Longest track text", "min": 0, "max": 80, "step": 4, "defaultValue": 20}
     ]
   }
 }
