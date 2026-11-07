@@ -3,7 +3,7 @@ use crate::app::{Action, App, FAV_SECTION, Focus, MODULES, Module, Scroll, fit_m
 use crate::copy;
 use crate::di;
 use crate::grid::*;
-use crate::meter::wave_level;
+use crate::meter::{FFT_N, bands, triggered, wave_level};
 
 const NOW_ROWS: usize = 12;
 const ART_COLS: usize = 21;
@@ -57,6 +57,7 @@ fn boxed(g: &mut Grid, x: usize, y: usize, w: usize, h: usize, title: Option<&st
     if let Some(title) = title {
         let line = format!("╔═[ {title} ]{}", "═".repeat(inner.saturating_sub(len(title) + 5)));
         g.put(x, y, &clip(&line, inner + 1), AMBER);
+        g.put(x + 4, y, &clip(title, inner.saturating_sub(3)), BRIGHT);
         g.put(x + w - 1, y, "╗", AMBER);
     }
     for row in y + 1..y + h - 1 {
@@ -98,7 +99,7 @@ fn text_box(g: &mut Grid, hits: &mut Hits, x: usize, y: usize, w: usize, prompt:
     }
     if !text.is_empty() {
         if let Some((label, action)) = end {
-            button(g, hits, x + w - len(label), y, label, AMBER, None, action);
+            button(g, hits, (x + w).saturating_sub(len(label)), y, label, AMBER, None, action);
         }
     }
 }
@@ -175,7 +176,7 @@ fn sidebar(g: &mut Grid, app: &mut App, hits: &mut Hits, cols: usize, rows: usiz
                 let time = hm(app.saved.seconds.get(&c.key).copied().unwrap_or(0));
                 let room = inner.saturating_sub(3 + len(&time) + 1);
                 g.put_on(4, y, &clip(&format!(" {}", c.name.to_uppercase()), room), ink, bg);
-                g.put_on(1 + inner - len(&time) - 1, y, &time, ink, bg);
+                g.put_on(inner.saturating_sub(len(&time)), y, &time, ink, bg);
                 hits.click(1, y, inner, Action::Play(c.id));
                 button(g, hits, 1, y, if fav { "[*]" } else { "[ ]" }, if on { BG } else if fav { BRIGHT } else { DIM }, bg, Action::ToggleFav(c.id));
             }
@@ -266,9 +267,9 @@ fn now_pane(g: &mut Grid, app: &App, hits: &mut Hits, x: usize, y: usize, cols: 
 
 /// `╔[<] TITLE [>]═══[+][x]╗` with working buttons.
 #[allow(clippy::too_many_arguments)]
-fn module_head(g: &mut Grid, hits: &mut Hits, x: usize, y: usize, w: usize, module: Module, slot: usize, can_add: bool, can_remove: bool) {
+fn module_head(g: &mut Grid, hits: &mut Hits, x: usize, y: usize, w: usize, module: Module, slot: usize, can_remove: bool) {
     let inner = w.saturating_sub(2);
-    let controls = 6 + if can_add { 3 } else { 0 } + if can_remove { 3 } else { 0 };
+    let controls = 6 + if can_remove { 3 } else { 0 };
     let title = if len(module.title()) + controls + 2 <= inner { module.title() } else { module.short() };
     g.put(x, y, "╔", AMBER);
     button(g, hits, x + 1, y, "[<]", AMBER, None, Action::Cycle(slot, -1));
@@ -277,13 +278,8 @@ fn module_head(g: &mut Grid, hits: &mut Hits, x: usize, y: usize, w: usize, modu
     button(g, hits, next, y, "[>]", AMBER, None, Action::Cycle(slot, 1));
     let fill = inner.saturating_sub(controls + len(title) + 2);
     g.put(next + 3, y, &"═".repeat(fill), AMBER);
-    let mut at = next + 3 + fill;
-    if can_add {
-        button(g, hits, at, y, "[+]", AMBER, None, Action::AddSlot);
-        at += 3;
-    }
     if can_remove {
-        button(g, hits, at, y, "[x]", AMBER, None, Action::RemoveSlot(slot));
+        button(g, hits, next + 3 + fill, y, "[x]", AMBER, None, Action::RemoveSlot(slot));
     }
     g.put(x + w - 1, y, "╗", AMBER);
 }
@@ -320,29 +316,160 @@ fn vu(g: &mut Grid, app: &App, x: usize, y: usize, cols: usize, rows: usize) {
     }
 }
 
-/// A rolling loudness waveform as text: one column per level, newest right, mirrored around the centre.
-pub fn wave_rows(levels: &[f32], cols: usize, rows: usize) -> Vec<String> {
-    let half = (rows * 2) as f32;
-    let start = levels.len().saturating_sub(cols);
-    let pad = cols.saturating_sub(levels.len());
-    let heights: Vec<f32> = std::iter::repeat_n(0.0, pad).chain(levels[start..].iter().map(|v| wave_level(*v) * half)).collect();
-    (0..rows)
-        .map(|r| {
-            heights
-                .iter()
-                .map(|h| {
-                    let top = ((2 * r) as f32 + 0.5 - half / 2.0).abs() < h / 2.0;
-                    let bottom = ((2 * r + 1) as f32 + 0.5 - half / 2.0).abs() < h / 2.0;
-                    match (top, bottom) {
-                        (true, true) => '█',
-                        (true, false) => '▀',
-                        (false, true) => '▄',
-                        _ => ' ',
-                    }
-                })
-                .collect()
-        })
-        .collect()
+/// A module's inside in font pixels: x, y, w, h.
+fn pixels(r: Rect) -> (usize, usize, usize, usize) {
+    (r.x * CELL_W, r.y * CELL_H, r.w * CELL_W, r.h * CELL_H)
+}
+
+const WAVE_STEP: usize = 2;
+
+/// Rolling loudness in hairlines, newest right, mirrored around the centre. Bright at the spine, fading to the tips
+/// and fading again with age, like a trace the phosphor is losing.
+fn wave(g: &mut Grid, levels: &[f32], r: Rect) {
+    let (x, y, w, h) = pixels(r);
+    let (mid, half) = (y + h / 2, h / 2);
+    let count = w / WAVE_STEP;
+    if count == 0 || half == 0 {
+        return;
+    }
+    for px in 0..w {
+        g.dot(x + px, mid, OFF);
+    }
+    let shown = &levels[levels.len().saturating_sub(count)..];
+    for (i, level) in shown.iter().enumerate() {
+        let column = count - shown.len() + i;
+        let age = 0.35 + 0.65 * (column + 1) as f32 / count as f32;
+        let tall = (wave_level(*level) * half as f32) as usize;
+        for d in 0..tall {
+            let c = glow(age * (1.0 - 0.8 * d as f32 / half as f32));
+            g.dot(x + column * WAVE_STEP, mid + d, c);
+            g.dot(x + column * WAVE_STEP, mid - 1 - d, c);
+        }
+    }
+}
+
+const LED_ON: usize = 4;
+const LED_GAP: usize = 2;
+
+/// A hi-fi spectrum: LED ladders brightening towards the top, each with a cap that floats down after it.
+fn spectrum(g: &mut Grid, app: &mut App, r: Rect) {
+    let (x, y, w, h) = pixels(r);
+    if w == 0 || h == 0 {
+        return;
+    }
+    let count = (w / 12).clamp(4, 48);
+    let (samples, rate) = app.radio.meter.samples(FFT_N);
+    app.spectrum.step(&bands(&samples, rate, count));
+    let pitch = w / count;
+    let width = (pitch * 3 / 4).max(1);
+    let leds = h / (LED_ON + LED_GAP);
+    let left = x + (w - pitch * count + pitch - width) / 2;
+    for b in 0..count {
+        let lit = (app.spectrum.bars[b] * leds as f32).round() as usize;
+        let cap = (app.spectrum.caps[b] * leds as f32).round() as usize;
+        for led in 0..leds {
+            let c = if led + 1 == cap {
+                BRIGHT
+            } else if led < lit {
+                glow(0.3 + 0.6 * led as f32 / leds as f32)
+            } else {
+                glow(0.12)
+            };
+            let top = y + h - (led + 1) * (LED_ON + LED_GAP);
+            for dy in 0..LED_ON {
+                for dx in 0..width {
+                    g.dot(left + b * pitch + dx, top + dy, c);
+                }
+            }
+        }
+    }
+}
+
+const TRAIL: usize = 5;
+const TRAIL_FADE: [f32; TRAIL] = [0.08, 0.14, 0.24, 0.45, 1.0];
+
+/// An oscilloscope: a graticule, a triggered trace, and the last few traces still fading on the phosphor.
+fn scope(g: &mut Grid, app: &mut App, r: Rect) {
+    let (x, y, w, h) = pixels(r);
+    if w < 10 || h < 8 {
+        return;
+    }
+    let (mid, half) = (y + h / 2, (h / 2).saturating_sub(2) as f32);
+    for row in (0..=8).map(|i| y + (h - 1) * i / 8) {
+        let c = if row == y + (h - 1) * 4 / 8 { glow(0.34) } else { glow(0.2) };
+        for px in (0..w).step_by(4) {
+            g.dot(x + px, row, c);
+        }
+    }
+    for column in (0..=10).map(|i| x + (w - 1) * i / 10) {
+        let c = if column == x + (w - 1) * 5 / 10 { glow(0.34) } else { glow(0.2) };
+        for py in (0..h).step_by(4) {
+            g.dot(column, y + py, c);
+        }
+    }
+    // About 46 ms at 44.1 kHz: two cycles of a 48 Hz kick with the bass and hats riding on it.
+    let (samples, _) = app.radio.meter.samples(4096);
+    let trace = triggered(&samples, 2048);
+    app.trail.push_back((0..w).map(|px| trace.get(px * trace.len() / w).copied().unwrap_or(0.0)).collect());
+    while app.trail.len() > TRAIL {
+        app.trail.pop_front();
+    }
+    let at = |v: f32| (mid as f32 - v.clamp(-1.0, 1.0) * half) as usize;
+    for (age, line) in app.trail.iter().enumerate() {
+        let fade = TRAIL_FADE[age + TRAIL - app.trail.len()];
+        for (px, v) in line.iter().enumerate().take(w) {
+            let (a, b) = (at(*v), at(line[px.saturating_sub(1)]));
+            let (top, bottom) = (a.min(b), a.max(b));
+            // A real beam dims where it moves fast: steep edges are fainter than the slow parts.
+            let c = glow(fade * (3.0 / (1 + bottom - top) as f32).clamp(0.6, 1.0));
+            for py in top..=bottom {
+                g.dot(x + px, py, c);
+            }
+        }
+    }
+}
+
+/// Left and right as one shape: a vertical line is mono, a wide cloud is wide stereo, and anything lying flat is out
+/// of phase. The left channel alone draws the upper left diagonal and the right alone the upper right.
+fn vectorscope(g: &mut Grid, app: &mut App, r: Rect) {
+    let (x, y, w, h) = pixels(r);
+    let size = w.min(h);
+    if size < 16 {
+        return;
+    }
+    let (cx, cy, radius) = ((x + w / 2) as f32, (y + h / 2) as f32, (size / 2 - 2) as f32);
+    for i in (0..size as i32).step_by(4).map(|i| i as f32 - radius) {
+        let diagonal = i * std::f32::consts::FRAC_1_SQRT_2;
+        g.dot((cx + i) as usize, cy as usize, glow(0.2));
+        g.dot(cx as usize, (cy + i) as usize, glow(0.34));
+        g.dot((cx + diagonal) as usize, (cy + diagonal) as usize, glow(0.2));
+        g.dot((cx + diagonal) as usize, (cy - diagonal) as usize, glow(0.2));
+    }
+    let top = (cy - radius * std::f32::consts::FRAC_1_SQRT_2) as usize / CELL_H;
+    let side = (radius * std::f32::consts::FRAC_1_SQRT_2) as usize / CELL_W + 1;
+    g.put((cx as usize / CELL_W).saturating_sub(side), top.saturating_sub(1), "L", DIM);
+    g.put(cx as usize / CELL_W + side, top.saturating_sub(1), "R", DIM);
+
+    let (samples, _) = app.radio.meter.stereo(1024);
+    // Kept relative to the centre: the layout can change between frames, and the trail must follow it.
+    app.vector_trail.push_back(samples.iter().map(|(l, r)| ((r - l) * std::f32::consts::FRAC_1_SQRT_2, (l + r) * std::f32::consts::FRAC_1_SQRT_2)).collect());
+    while app.vector_trail.len() > TRAIL {
+        app.vector_trail.pop_front();
+    }
+    for (age, line) in app.vector_trail.iter().enumerate() {
+        let fade = TRAIL_FADE[age + TRAIL - app.vector_trail.len()];
+        let at = |p: &(f32, f32)| (cx + p.0.clamp(-1.0, 1.0) * radius, cy - p.1.clamp(-1.0, 1.0) * radius);
+        for pair in line.windows(2) {
+            let (from, to) = (at(&pair[0]), at(&pair[1]));
+            let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+            let steps = dx.abs().max(dy.abs()).ceil().max(1.0);
+            let c = glow(fade * (6.0 / steps).clamp(0.5, 1.0));
+            for s in 0..=steps as u32 {
+                let t = s as f32 / steps;
+                g.dot((from.0 + dx * t) as usize, (from.1 + dy * t) as usize, c);
+            }
+        }
+    }
 }
 
 fn check(g: &mut Grid, x: usize, y: usize, on: bool) {
@@ -464,7 +591,17 @@ fn status_bar(g: &mut Grid, app: &App, hits: &mut Hits, y: usize) {
     let legend = copy::legend();
     g.put_on(0, y, &" ".repeat(cols), BG, Some(AMBER));
     g.put_on(0, y, &clip(&left, cols), BG, Some(AMBER));
-    if cols >= len(&left) + len(&legend) + 10 {
+    // Inverted against the bar, so a new version is the one thing on it that stands out.
+    let update = app.update.as_ref().map(|v| match (app.updating, app.update_failed) {
+        (true, _) => copy::UPDATING.to_string(),
+        (_, true) => copy::UPDATE_FAILED.to_string(),
+        _ => format!("[ {} {v} ]", copy::NEW_VERSION),
+    });
+    let update_w = update.as_ref().map_or(0, |u| len(u) + 1);
+    if let Some(label) = update.filter(|u| len(&left) + 1 + len(u) + 8 <= cols) {
+        button(g, hits, len(&left) + 1, y, &label, BRIGHT, Some(BG), Action::Update);
+    }
+    if cols >= len(&left) + update_w + len(&legend) + 10 {
         g.put_on(cols - len(&legend) - 8, y, &legend, BG, Some(AMBER));
     }
     if cols >= 8 {
@@ -499,7 +636,18 @@ pub fn draw(g: &mut Grid, app: &mut App, hits: &mut Hits) -> Option<(usize, usiz
         let slots = app.saved.slots.clone();
         let fit = fit_modules(&slots, right);
         let used: usize = fit.iter().map(|(m, _)| m.min_cols()).sum();
-        let room = slots.len() == fit.len() && slots.len() < MODULES.len() && used + Module::Last.min_cols() <= right;
+        // What's off the bay sits on the rail above it, one click from coming back. Only what would fit.
+        if slots.len() == fit.len() && now_box >= 2 {
+            let (mut at, end) = (side + 2, cols.saturating_sub(2));
+            for m in MODULES.iter().filter(|m| !slots.contains(m) && used + m.min_cols() <= right) {
+                let label = format!("[+ {}]", m.short());
+                if at + len(&label) > end {
+                    break;
+                }
+                button(g, hits, at, now_box - 1, &label, AMBER, None, Action::AddModule(*m));
+                at += len(&label) + 1;
+            }
+        }
         let mut x = side;
         for (i, (module, w)) in fit.iter().enumerate() {
             let w = (*w).min(cols.saturating_sub(x));
@@ -507,16 +655,17 @@ pub fn draw(g: &mut Grid, app: &mut App, hits: &mut Hits) -> Option<(usize, usiz
                 break;
             }
             boxed(g, x, now_box, w, bay, None);
-            module_head(g, hits, x, now_box, w, *module, i, room && i + 1 == fit.len(), slots.len() > 1);
+            module_head(g, hits, x, now_box, w, *module, i, slots.len() > 1);
             let r = Rect { x: x + 1, y: now_box + 1, w: w - 2, h: bay - 2 };
             match module {
                 Module::Vu => vu(g, app, r.x, r.y, r.w, r.h),
                 Module::Wave => {
-                    let levels = app.radio.meter.recent(r.w);
-                    for (i, line) in wave_rows(&levels, r.w, r.h).iter().enumerate() {
-                        g.put(r.x, r.y + i, line, AMBER);
-                    }
+                    let levels = app.radio.meter.recent(r.w * CELL_W / WAVE_STEP);
+                    wave(g, &levels, r);
                 }
+                Module::Spectrum => spectrum(g, app, r),
+                Module::Scope => scope(g, app, r),
+                Module::Vector => vectorscope(g, app, r),
                 Module::Last => history(g, app, hits, r),
                 Module::Liked => likes(g, app, hits, r),
                 Module::Heard => heard(g, app, hits, r),
@@ -581,7 +730,7 @@ mod tests {
     fn no_size_panics_with_any_module_showing() {
         let mut app = App::demo();
         app.saved.heard.push(crate::app::Heard { date: 1_700_000_000.0, channel: "Techno".into(), track_id: 1, artist: "A".into(), title: "T".into(), art: None });
-        for slots in [vec![Module::Vu, Module::Wave, Module::Last], vec![Module::Liked, Module::Heard, Module::Habits], vec![Module::Heard], vec![Module::Habits, Module::Vu]] {
+        for slots in [vec![Module::Vu, Module::Wave, Module::Last], vec![Module::Liked, Module::Heard, Module::Habits], vec![Module::Heard], vec![Module::Habits, Module::Vu], vec![Module::Spectrum, Module::Scope, Module::Wave, Module::Vector]] {
             app.saved.slots = slots;
             for cols in 1..150 {
                 for rows in 1..60 {
@@ -668,12 +817,157 @@ mod tests {
         assert!(g.cells.iter().filter(|c| c.ch == '█').count() == 0, "{}", g.text());
     }
 
+    /// The font pixels lit in `r`, as (x, y) from the module's top left, ignoring anything dimmer than `floor`.
+    fn lit(g: &Grid, r: Rect, floor: u8) -> Vec<(usize, usize)> {
+        let width = g.cols * CELL_W;
+        g.dots.iter().filter(|(_, c)| c[0] > floor).map(|(at, _)| (at % width - r.x * CELL_W, at / width - r.y * CELL_H)).collect()
+    }
+
     #[test]
-    fn waveform_is_mirrored_and_newest_is_right() {
-        let rows = wave_rows(&[0.0, 1.0], 3, 2);
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].chars().collect::<Vec<_>>(), [' ', ' ', '█']);
-        assert_eq!(rows[1].chars().collect::<Vec<_>>(), [' ', ' ', '█']);
+    fn waveform_is_hairlines_mirrored_with_the_newest_right() {
+        let r = Rect { x: 0, y: 0, w: 2, h: 2 };
+        let mut g = Grid::new(4, 4);
+        wave(&mut g, &[0.0, 1.0], r);
+        let dots = lit(&g, r, OFF[0]);
+        let mut columns: Vec<usize> = dots.iter().map(|d| d.0).collect();
+        columns.dedup();
+        assert_eq!(columns, [16], "one level is one column, at the right");
+        assert_eq!(dots.len(), 32, "the whole height at full level");
+        let brightness = |y: usize| g.dots.iter().rfind(|(at, _)| *at == y * 36 + 16).unwrap().1[0];
+        assert!(brightness(16) > brightness(31), "fades from the spine to the tip");
+        assert_eq!(brightness(15), brightness(16), "mirrored");
+    }
+
+    #[test]
+    fn older_waveform_columns_are_dimmer() {
+        let r = Rect { x: 0, y: 0, w: 2, h: 2 };
+        let mut g = Grid::new(4, 4);
+        wave(&mut g, &[1.0; 9], r);
+        let at_x = |x: usize| g.dots.iter().find(|(at, c)| at % 36 == x && *c != OFF).unwrap().1[0];
+        assert!(at_x(0) < at_x(16), "{} {}", at_x(0), at_x(16));
+    }
+
+    #[test]
+    fn visualisers_only_draw_the_phosphor_and_stay_inside_their_module() {
+        let mut app = App::demo();
+        app.saved.slots = vec![Module::Spectrum, Module::Scope, Module::Vector];
+        for i in 0..80 {
+            app.radio.meter.push_demo(i as f32 * 0.05);
+        }
+        let (mut g, mut hits) = (Grid::new(132, 47), Hits::default());
+        draw(&mut g, &mut app, &mut hits);
+        let t = g.text();
+        assert!(t.contains(" SPECTRUM ") && t.contains(" OSCILLOSCOPE ") && t.contains(" VECTORSCOPE "), "{t}");
+        assert!(g.dots.len() > 1000);
+        let top = NOW_ROWS + 3;
+        for (at, c) in &g.dots {
+            assert!(at / (132 * CELL_W) >= top * CELL_H, "above the bay");
+            let (gr, bl) = (c[1] as f32 / c[0].max(1) as f32, c[2] as f32 / c[0].max(1) as f32);
+            assert!(c[0] < 20 || ((gr - 0.659).abs() < 0.05 && (bl - 0.122).abs() < 0.05), "{c:?}");
+        }
+    }
+
+    #[test]
+    fn the_vectorscope_draws_mono_as_a_vertical_line() {
+        let mut app = App::demo();
+        app.saved.slots = vec![Module::Vector];
+        app.radio.meter.push(crate::meter::Levels::default());
+        let tone: Vec<(f32, f32)> = (0..2048).map(|i| ((i as f32 * 0.1).sin(), (i as f32 * 0.1).sin())).collect();
+        app.radio.meter.push_samples(&tone, 44100);
+        let r = Rect { x: 40, y: 20, w: 40, h: 20 };
+        let mut g = Grid::new(132, 47);
+        vectorscope(&mut g, &mut app, r);
+        let centre = (40 * CELL_W + 20 * CELL_W) as i64;
+        let bright: Vec<_> = lit(&g, r, 200);
+        assert!(bright.len() > 50, "{}", bright.len());
+        assert!(bright.iter().all(|(x, _)| ((x + 40 * CELL_W) as i64 - centre).abs() <= 1), "mono stays on the centre line");
+    }
+
+    /// Dragging the window moves the module while its trail is still fading.
+    #[test]
+    fn the_vectorscope_trail_follows_a_layout_change() {
+        let mut app = App::demo();
+        app.saved.slots = vec![Module::Vector];
+        app.radio.meter.push_demo(1.0);
+        draw(&mut Grid::new(200, 80), &mut app, &mut Hits::default());
+        let mut g = Grid::new(132, 47);
+        let r = Rect { x: 60, y: 20, w: 40, h: 20 };
+        vectorscope(&mut g, &mut app, r);
+        let width = 132 * CELL_W;
+        for (at, _) in &g.dots {
+            let (x, y) = (at % width, at / width);
+            assert!((60 * CELL_W..100 * CELL_W).contains(&x) && (20 * CELL_H..40 * CELL_H).contains(&y), "stray dot at {x},{y}");
+        }
+    }
+
+    #[test]
+    fn a_new_version_shows_a_button_that_starts_the_update() {
+        let mut app = App::demo();
+        let (mut g, mut hits) = (Grid::new(132, 47), Hits::default());
+        draw(&mut g, &mut app, &mut hits);
+        assert!(!g.text().contains(copy::NEW_VERSION), "nothing to say yet");
+        assert!(!hits.clicks.iter().any(|(_, a)| *a == Action::Update));
+
+        app.update = Some("9.9.9".into());
+        let (mut g, mut hits) = (Grid::new(132, 47), Hits::default());
+        draw(&mut g, &mut app, &mut hits);
+        let (x, y) = cell_of(&hits, &Action::Update);
+        assert!(g.text().lines().nth(y).unwrap().chars().skip(x).collect::<String>().starts_with("[ NEW SHIT 9.9.9 ]"), "{}", g.text());
+
+        app.updating = true;
+        let (mut g, mut hits) = (Grid::new(132, 47), Hits::default());
+        draw(&mut g, &mut app, &mut hits);
+        assert!(g.text().contains(copy::UPDATING));
+        app.updating = false;
+        app.update_failed = true;
+        let (mut g, mut hits) = (Grid::new(132, 47), Hits::default());
+        draw(&mut g, &mut app, &mut hits);
+        assert!(g.text().contains(copy::UPDATE_FAILED));
+    }
+
+    #[test]
+    fn the_scope_keeps_a_short_fading_trail() {
+        let mut app = App::demo();
+        app.saved.slots = vec![Module::Scope];
+        app.radio.meter.push_demo(1.0);
+        for _ in 0..9 {
+            draw(&mut Grid::new(132, 47), &mut app, &mut Hits::default());
+        }
+        assert_eq!(app.trail.len(), TRAIL);
+    }
+
+    #[test]
+    fn a_removed_module_waits_on_the_rail_and_comes_back_with_a_click() {
+        let mut app = App::demo();
+        let (mut g, mut hits) = (Grid::new(200, 47), Hits::default());
+        draw(&mut g, &mut app, &mut hits);
+        assert!(g.text().contains("[+ SPECTRUM]═[+ SCOPE]"), "spare modules are offered\n{}", g.text());
+
+        let (x, y) = cell_of(&hits, &Action::RemoveSlot(0));
+        let action = hits.action_at(x, y).unwrap().clone();
+        app.act(action);
+        assert!(!app.saved.slots.contains(&Module::Vu));
+
+        let (mut g, mut hits) = (Grid::new(200, 47), Hits::default());
+        draw(&mut g, &mut app, &mut hits);
+        assert!(g.text().contains("[+ VU]"), "{}", g.text());
+        let (x, y) = cell_of(&hits, &Action::AddModule(Module::Vu));
+        assert!(g.text().lines().nth(y).unwrap().chars().skip(x).collect::<String>().starts_with("[+ VU]"));
+        let action = hits.action_at(x, y).unwrap().clone();
+        app.act(action);
+        assert!(app.saved.slots.contains(&Module::Vu));
+    }
+
+    #[test]
+    fn the_rail_only_offers_what_fits() {
+        let mut app = App::demo();
+        let (mut g, mut hits) = (Grid::new(132, 47), Hits::default());
+        draw(&mut g, &mut app, &mut hits);
+        assert!(!hits.clicks.iter().any(|(_, a)| matches!(a, Action::AddModule(_))), "the default window has no spare width");
+        app.saved.slots = vec![Module::Last];
+        let (mut g, mut hits) = (Grid::new(132, 47), Hits::default());
+        draw(&mut g, &mut app, &mut hits);
+        assert!(hits.clicks.iter().any(|(_, a)| *a == Action::AddModule(Module::Vu)));
     }
 
     #[test]

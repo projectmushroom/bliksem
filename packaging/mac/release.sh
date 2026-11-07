@@ -3,6 +3,7 @@
 set -eo pipefail
 cd "$(dirname "$0")/../.."
 V=${1:?version, e.g. 1.0.0}
+grep -q "^version = \"$V\"" Cargo.toml || { echo "Cargo.toml doesn't say version $V"; exit 1; }
 [ -z "$(git status --porcelain)" ] || { echo "commit first, working tree is dirty"; exit 1; }
 VERSION="$V" packaging/mac/build.sh
 STAGE=$(mktemp -d)

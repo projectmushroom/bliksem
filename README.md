@@ -60,6 +60,10 @@ dev/e2e-omarchy.sh                 # the full chain on Omarchy with no key and n
 dev/test-launcher.sh               # the script the bar runs: right player, notification when it dies
 ```
 
+## When something goes wrong
+
+`bliksem report` prints the log, audio details and player state as Markdown for an agent to read, without the key. Run `bliksem mark "pop"` the moment something happens, so the log shows when. The log is at `~/.local/state/bliksem.log` on Omarchy and `~/Library/Logs/BLIKSEM.log` on the Mac. `packaging/omarchy/projectmushroom.bliksem/AGENTS.md` tells an agent on the machine what to do.
+
 `BLIKSEM_DATA=/some/folder` keeps all saved data there, which also stops the Mac import. `--stream URL` plays that URL
 instead of asking DI, `--capture out.png` saves what the window was handed every 2 seconds, and `--trace` logs clicks
 and shortcuts. Don't run tests against the real stream without thinking: any connection with your key can stop your own

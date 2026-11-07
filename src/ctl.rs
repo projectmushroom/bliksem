@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::time::Duration;
 
-pub const COMMANDS: [&str; 8] = ["show", "window", "toggle", "next", "prev", "like", "status", "quit"];
+pub const COMMANDS: [&str; 9] = ["show", "window", "toggle", "next", "prev", "like", "status", "update", "quit"];
 
 fn path() -> PathBuf {
     if std::env::var_os("BLIKSEM_DATA").is_none() {

@@ -1,7 +1,7 @@
 //! Everything the screen shows and everything a click or key can do. No window code, so tests can drive it.
 use crate::copy;
 use crate::di::{self, Channel, HistoryTrack, StreamError, Track};
-use crate::meter::Ballistics;
+use crate::meter::{Ballistics, Spectrum};
 use crate::radio::{Radio, Sink, State};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -19,19 +19,25 @@ const HEARD_CAP: usize = 5000;
 pub enum Module {
     Vu,
     Wave,
+    Spectrum,
+    Scope,
+    Vector,
     Last,
     Liked,
     Heard,
     Habits,
 }
 
-pub const MODULES: [Module; 6] = [Module::Vu, Module::Wave, Module::Last, Module::Liked, Module::Heard, Module::Habits];
+pub const MODULES: [Module; 9] = [Module::Vu, Module::Wave, Module::Spectrum, Module::Scope, Module::Vector, Module::Last, Module::Liked, Module::Heard, Module::Habits];
 
 impl Module {
     pub fn title(self) -> &'static str {
         match self {
             Module::Vu => copy::VU,
             Module::Wave => copy::WAVE,
+            Module::Spectrum => copy::SPECTRUM,
+            Module::Scope => copy::SCOPE,
+            Module::Vector => copy::VECTOR,
             Module::Last => copy::LAST_ON,
             Module::Liked => copy::LIKES,
             Module::Heard => copy::HEARD,
@@ -42,6 +48,9 @@ impl Module {
         match self {
             Module::Vu => copy::VU_SHORT,
             Module::Wave => copy::WAVE,
+            Module::Spectrum => copy::SPECTRUM,
+            Module::Scope => copy::SCOPE_SHORT,
+            Module::Vector => copy::VECTOR_SHORT,
             Module::Last => copy::LAST_ON_SHORT,
             Module::Liked => copy::LIKES_SHORT,
             Module::Heard => copy::HEARD_SHORT,
@@ -269,6 +278,8 @@ pub enum Event {
     Ctl(String, std::os::unix::net::UnixStream),
     /// Media keys, the Omarchy bar, Control Center.
     Remote(souvlaki::MediaControlEvent),
+    UpdateFound(String),
+    UpdateDone(bool),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -307,7 +318,8 @@ pub enum Action {
     OpenApple(i64),
     Open(String),
     Cycle(usize, i32),
-    AddSlot,
+    AddModule(Module),
+    Update,
     RemoveSlot(usize),
     ZoomIn,
     ZoomOut,
@@ -346,6 +358,17 @@ pub struct App {
     pub focus: Focus,
     pub radio: Radio,
     pub needle: Ballistics,
+    pub spectrum: Spectrum,
+    /// The scope's last few traces, newest last: the phosphor still glowing where the beam just was.
+    pub trail: std::collections::VecDeque<Vec<f32>>,
+    /// The same glow for the vectorscope.
+    pub vector_trail: std::collections::VecDeque<Vec<(f32, f32)>>,
+    /// A newer version, once one is known.
+    pub update: Option<String>,
+    pub updating: bool,
+    pub update_failed: bool,
+    /// The new version is in place: start it.
+    pub want_restart: bool,
     pub scroll: HashMap<Scroll, usize>,
     /// Scroll the sidebar to the current channel on the next draw.
     pub reveal: bool,
@@ -390,6 +413,13 @@ impl App {
             focus: Focus::None,
             radio,
             needle: Ballistics::default(),
+            spectrum: Spectrum::default(),
+            trail: Default::default(),
+            vector_trail: Default::default(),
+            update: None,
+            updating: false,
+            update_failed: false,
+            want_restart: false,
             scroll: HashMap::new(),
             reveal: false,
             art: HashMap::new(),
@@ -421,6 +451,8 @@ impl App {
         let saved = load(&dir);
         let mut app = Self::with(saved, Radio::new(Sink::Device), Some(dir), false);
         crate::ctl::serve(app.tx.clone());
+        crate::log::note("start", serde_json::json!({ "version": crate::update::VERSION, "os": std::env::consts::OS, "arch": std::env::consts::ARCH }));
+        app.bg(crate::update::watch);
         app.media = crate::media::Media::new(app.tx.clone());
         app.bg(|tx| {
             let channels = di::channels();
@@ -590,9 +622,31 @@ impl App {
         }
     }
 
-    pub fn add_slot(&mut self) {
-        if let Some(free) = MODULES.iter().find(|m| !self.saved.slots.contains(m)) {
-            self.saved.slots.push(*free);
+    /// On Omarchy the plugin updates itself and the app restarts into it. The Mac gets the release page: its app is a
+    /// download you drag in, and replacing that underneath itself isn't worth it for one user.
+    pub fn start_update(&mut self) {
+        let Some(version) = self.update.clone() else { return };
+        if cfg!(target_os = "macos") {
+            di::open_url(&format!("https://github.com/projectmushroom/bliksem/releases/tag/v{version}"));
+            return;
+        }
+        if self.updating {
+            return;
+        }
+        self.updating = true;
+        self.update_failed = false;
+        self.bg(|tx| {
+            let result = std::process::Command::new("omarchy").args(["plugin", "update", crate::update::PLUGIN, "--yes"]).stdin(std::process::Stdio::null()).output();
+            let ok = result.as_ref().is_ok_and(|o| o.status.success());
+            let said = result.map_or_else(|e| e.to_string(), |o| String::from_utf8_lossy(&o.stderr).into_owned());
+            crate::log::note("update_run", serde_json::json!({ "ok": ok, "said": said.chars().rev().take(300).collect::<String>().chars().rev().collect::<String>() }));
+            let _ = tx.send(Event::UpdateDone(ok));
+        });
+    }
+
+    pub fn add_module(&mut self, m: Module) {
+        if !self.saved.slots.contains(&m) {
+            self.saved.slots.push(m);
             self.dirty = true;
         }
     }
@@ -619,6 +673,7 @@ impl App {
     }
 
     pub fn play(&mut self, c: &Channel) {
+        crate::log::note("play", serde_json::json!({ "channel": c.key }));
         self.current = Some(c.clone());
         self.last_track = None;
         self.history.clear();
@@ -764,9 +819,19 @@ impl App {
                     "prev" => self.hop(-1),
                     "like" => self.like_current(),
                     "quit" => self.want_quit = true,
+                    "update" => self.start_update(),
                     _ => {}
                 }
                 let _ = writeln!(stream, "{}", self.status_json());
+            }
+            Event::UpdateFound(v) => {
+                crate::log::note("update_found", serde_json::json!({ "version": v }));
+                self.update = Some(v);
+            }
+            Event::UpdateDone(ok) => {
+                self.updating = false;
+                self.update_failed = !ok;
+                self.want_restart = ok;
             }
             Event::Apple(id, url) => {
                 if let Some(l) = self.saved.likes.iter_mut().find(|l| l.id == id) {
@@ -787,6 +852,8 @@ impl App {
             "artist": t.map(|t| t.artist()),
             "title": t.map(|t| t.title()),
             "status": self.status,
+            "version": crate::update::VERSION,
+            "update": self.update,
             "liked": t.is_some_and(|t| self.is_liked(t.id)),
         })
     }
@@ -929,7 +996,8 @@ impl App {
             }
             Action::Open(url) => di::open_url(&url),
             Action::Cycle(slot, by) => self.cycle(slot, by),
-            Action::AddSlot => self.add_slot(),
+            Action::AddModule(m) => self.add_module(m),
+            Action::Update => self.start_update(),
             Action::RemoveSlot(i) => self.remove_slot(i),
             Action::ZoomIn => self.zoom_in(),
             Action::ZoomOut => self.zoom_out(),
@@ -1121,14 +1189,31 @@ mod tests {
     }
 
     #[test]
+    fn a_finished_update_asks_for_a_restart_and_a_failed_one_can_retry() {
+        let mut a = app();
+        a.start_update();
+        assert!(!a.updating, "nothing to update to yet");
+        a.handle(Event::UpdateFound("9.9.9".into()));
+        assert_eq!(a.update.as_deref(), Some("9.9.9"));
+        assert!(a.status_json().to_string().contains("9.9.9"));
+        a.updating = true;
+        a.handle(Event::UpdateDone(false));
+        assert!(a.update_failed && !a.updating && !a.want_restart);
+        a.handle(Event::UpdateDone(true));
+        assert!(a.want_restart && !a.update_failed);
+    }
+
+    #[test]
     fn slots_cycle_past_what_is_showing_and_keep_one() {
         let mut a = app();
         a.cycle(0, 1);
-        assert_eq!(a.saved.slots[0], Module::Liked, "wave and last are already showing");
+        assert_eq!(a.saved.slots[0], Module::Spectrum, "wave is already showing");
         a.cycle(0, -1);
         assert_eq!(a.saved.slots[0], Module::Vu);
-        a.add_slot();
-        assert_eq!(a.saved.slots.len(), 4);
+        a.add_module(Module::Scope);
+        a.add_module(Module::Scope);
+        assert_eq!(a.saved.slots.len(), 4, "added once");
+        assert_eq!(a.saved.slots[3], Module::Scope, "goes on the end");
         for _ in 0..9 {
             a.remove_slot(0);
         }

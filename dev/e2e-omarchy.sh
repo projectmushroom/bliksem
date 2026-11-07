@@ -13,26 +13,30 @@ CAP=/tmp/bliksem-e2e-cap.png; FAILED=0
 check() { if [ "$2" = "$3" ]; then echo "ok    $1"; else echo "FAIL  $1: got '$2', wanted '$3'"; FAILED=1; fi; }
 field() { "$B" status | python3 -c "import json,sys;print(json.load(sys.stdin)['$1'])"; }
 mpris() { busctl --user get-property org.mpris.MediaPlayer2.bliksem /org/mpris/MediaPlayer2 org.mpris.MediaPlayer2.Player "$1" 2>&1; }
+active() { hyprctl -j activewindow | python3 -c 'import json,sys;print(json.load(sys.stdin).get("title",""))'; }
+current_ws() { hyprctl -j activeworkspace | python3 -c 'import json,sys;print(json.load(sys.stdin)["name"])'; }
 windows() { hyprctl -j clients | python3 -c 'import json,sys;print(sum(c["title"]=="BLIKSEM" for c in json.load(sys.stdin)))'; }
 bar_width() { omarchy-shell shell debugBarGeometry | python3 -c 'import json,sys;print(max([w["width"] for w in json.load(sys.stdin) if w["id"]=="projectmushroom.bliksem"] or [0]))'; }
 cleanup() {
   "$B" quit >/dev/null 2>&1; sleep .5; pkill -x bliksem 2>/dev/null
-  kill "${FAKE:-}" "${REC:-}" 2>/dev/null
+  kill "${FAKE:-}" "${REC:-}" "${NEWS:-}" 2>/dev/null
   [ -n "${SINK:-}" ] && pactl unload-module "$SINK" 2>/dev/null
   hyprctl output remove $OUT >/dev/null 2>&1
   hyprctl eval "hl.dispatch(hl.dsp.focus({ monitor = '$HOME_MONITOR' }))" >/dev/null 2>&1
-  rm -rf "$BLIKSEM_DATA" /tmp/bliksem-e2e.wav "$CAP"
+  rm -rf "$BLIKSEM_DATA" /tmp/bliksem-e2e.wav "$CAP" "${NEWS_DIR:-}"
 }
 HOME_MONITOR=$(hyprctl -j monitors | python3 -c 'import json,sys;print(next((m["name"] for m in json.load(sys.stdin) if m["focused"]),""))')
 trap cleanup EXIT
 python3 "$ROOT/dev/fake-icecast.py" "$ROOT/assets/test-tone.mp3" $PORT & FAKE=$!
+NEWS_DIR=$(mktemp -d); echo '{"version":"9.9.9"}' > "$NEWS_DIR/manifest.json"
+python3 -m http.server --bind 127.0.0.1 --directory "$NEWS_DIR" $((PORT+1)) >/dev/null 2>&1 & NEWS=$!
 SINK=$(pactl load-module module-null-sink sink_name=bliksem_test sink_properties=node.description=bliksem_test)
 default_before=$(pactl get-default-sink)
 hyprctl output create headless $OUT >/dev/null; sleep 1
 hyprctl eval 'hl.monitor({ output = "bliksem-test", mode = "2448x1600@60", position = "auto", scale = 2 })' >/dev/null; sleep 1
 WS=$(hyprctl -j monitors | python3 -c 'import json,sys;print(next(m["activeWorkspace"]["name"] for m in json.load(sys.stdin) if m["name"]=="bliksem-test"))')
 pw-record --target bliksem_test --format f32 --rate 44100 --channels 2 -P stream.capture.sink=true /tmp/bliksem-e2e.wav & REC=$!
-hyprctl eval "hl.exec_cmd('sh -c \"BLIKSEM_DATA=$BLIKSEM_DATA PIPEWIRE_NODE=bliksem_test exec $B --stream http://127.0.0.1:$PORT/techno_hi --capture $CAP > /tmp/bliksem-e2e.log 2>&1\"', { workspace = '$WS silent' })" >/dev/null
+hyprctl eval "hl.exec_cmd('sh -c \"BLIKSEM_DATA=$BLIKSEM_DATA BLIKSEM_UPDATE_URL=http://127.0.0.1:$((PORT+1))/manifest.json PIPEWIRE_NODE=bliksem_test exec $B --stream http://127.0.0.1:$PORT/techno_hi --capture $CAP > /tmp/bliksem-e2e.log 2>&1\"', { workspace = '$WS silent' })" >/dev/null
 sleep 6
 check "window opened" "$(windows)" 1
 check "starts idle" "$(field playing)" False
@@ -52,10 +56,31 @@ sleep 5
 "$B" show >/dev/null; sleep 3
 check "bar brings the window back" "$(windows)" 1
 check "still one player" "$(pgrep -xc bliksem)" 1
+WIN_WS=$(hyprctl -j clients | python3 -c 'import json,sys;print(next(c["workspace"]["name"] for c in json.load(sys.stdin) if c["title"]=="BLIKSEM"))')
+WAS_ON=$(current_ws)
+hyprctl eval "hl.dispatch(hl.dsp.focus({ workspace = '9' }))" >/dev/null; sleep 1
+"$B" window >/dev/null; sleep 2
+check "bar click switches to the app" "$(current_ws)" "$WIN_WS"
+hyprctl eval "hl.dispatch(hl.dsp.focus({ workspace = '$WAS_ON' }))" >/dev/null
+# Needs a seat with real keyboard focus, which a locked or lid-closed box doesn't have.
+if [ "$(active)" = BLIKSEM ]; then
+  "$B" window >/dev/null; sleep 2
+  check "bar click again hides it" "$(windows)" 0
+  "$B" window >/dev/null; sleep 3
+else
+  echo "skip  bar click again hides it: nothing can hold keyboard focus on this box"
+fi
 sleep 3; cp "$CAP" /tmp/bliksem-e2e-reopened.png 2>/dev/null
 busctl --user call org.mpris.MediaPlayer2.bliksem /org/mpris/MediaPlayer2 org.mpris.MediaPlayer2.Player Pause; sleep 1
 check "media key stops it" "$(field playing)" False
 check "default output untouched" "$(pactl get-default-sink)" "$default_before"
+"$B" mark e2e-mark >/dev/null
+REPORT=$("$B" report)
+check "report explains itself" "$(grep -c '^## How to read this' <<<"$REPORT")" 1
+check "report has the audio setup" "$(grep -c '"event":"audio_open"' <<<"$REPORT" | sed 's/^[1-9][0-9]*$/yes/')" yes
+check "report has the mark" "$(grep -c 'e2e-mark' <<<"$REPORT" | sed 's/^[1-9][0-9]*$/yes/')" yes
+check "report has PipeWire details" "$(grep -c 'clock.quantum' <<<"$REPORT" | sed 's/^[1-9][0-9]*$/yes/')" yes
+check "a newer version is noticed" "$(field update)" 9.9.9
 sleep 1; kill $REC 2>/dev/null; REC=; sleep .4
 python3 - <<'P'
 import math, struct
@@ -70,6 +95,14 @@ seg = [i for i in range(0, len(L)-44100, 44100) if max(abs(s) for s in L[i:i+441
 i = seg[len(seg)//2]; l, r = L[i:i+44100], R[i:i+44100]
 print("ok   " if tone(l,220) > 0.03 and tone(r,330) > 0.03 and tone(l,330) < 0.005 else "FAIL ", "real audio: %.1fs with sound, L 220Hz=%.3f R 330Hz=%.3f" % (loud/10, tone(l,220), tone(r,330)))
 P
-"$B" status >/dev/null
+# Last, because it restarts the player. The plugin is already current, so this only proves the update and restart path.
+BEFORE=$(pgrep -x bliksem)
+"$B" update >/dev/null
+for _ in $(seq 30); do sleep 1; grep -q '"update_run"' "$BLIKSEM_DATA/bliksem.log" && break; done
+sleep 4
+check "update ran" "$(grep '"update_run"' "$BLIKSEM_DATA/bliksem.log" | tail -1 | python3 -c 'import json,sys;print(json.loads(sys.stdin.read())["ok"])')" True
+check "restarted in place" "$(pgrep -x bliksem)" "$BEFORE"
+check "answering after the restart" "$(field version)" "$(grep -m1 '^version' "$ROOT/Cargo.toml" | cut -d'"' -f2)"
+check "window back after the restart" "$(windows)" 1
 [ $FAILED = 0 ] && echo "ALL GOOD" || echo "SOME FAILED"
 exit $FAILED
